@@ -212,37 +212,85 @@ class GPUToStorageHandler(BaseStorageOffloadingHandler):
 
         # IsoQuant/RotorQuant encoding
         if self.codec and self.tensor_to_layer_map:
-            logger.info(f"Encoding {sum(len(ids) for ids in per_file_block_ids)} blocks")
+            total_blocks = sum(len(ids) for ids in per_file_block_ids)
+            logger.info(f"Encoding {total_blocks} blocks")
             
-            # Encode blocks into batch buffers
-            for file_idx, block_ids in enumerate(per_file_block_ids):
-                for tensor_idx in range(len(self.original_tensors)):
-                    layer_name = self.tensor_to_layer_map.get(tensor_idx)
-                    if layer_name:
-                        # Determine if this is K or V tensor (even=K, odd=V)
-                        kv_type = "k" if tensor_idx % 2 == 0 else "v"
+            # Handle cross-layer vs standard tensor format
+            if self.cross_layer_info["is_cross_layer"]:
+                # Cross-layer format: tensor shape is (num_blocks, num_layers, 2, block_size, heads, head_size)
+                # We need to iterate over layers and K/V, encoding each slice separately
+                num_layers = self.cross_layer_info["num_layers"]
+                layers_dim = self.cross_layer_info["layers_dim"]  # 1
+                kv_dim = self.cross_layer_info["kv_dim"]  # 2
+                
+                for file_idx, block_ids in enumerate(per_file_block_ids):
+                    # Get full cross-layer tensor (only 1 tensor in cross-layer mode)
+                    cross_layer_tensor = self.original_tensors[0]
+                    
+                    # Index by block IDs first: shape becomes (num_selected_blocks, num_layers, 2, block_size, heads, head_size)
+                    block_ids_tensor = torch.tensor(block_ids, device=cross_layer_tensor.device)
+                    blocks_selected = cross_layer_tensor[block_ids_tensor]
+                    
+                    for layer_idx in range(num_layers):
+                        layer_name = f"layer_{layer_idx}"
                         
-                        # Encode batch using codec
-                        self.codec.encode_batch(
-                            layer_name=layer_name,
-                            kv_type=kv_type,
-                            source_tensor=self.original_tensors[tensor_idx],
-                            source_block_ids=block_ids,
-                            dest_buffer=self.encoded_tensors[tensor_idx],
-                            dest_start_idx=0,
-                        )
+                        for kv_idx, kv_type in enumerate(["k", "v"]):
+                            # Extract slice: (num_blocks, block_size, heads, head_size)
+                            # From shape (num_blocks, num_layers, 2, block_size, heads, head_size)
+                            # Select layer_idx on dim 1, kv_idx on dim 2 (after block selection)
+                            source_slice = blocks_selected[:, layer_idx, kv_idx, :, :, :]
+                            
+                            # Create a destination buffer index for this layer/kv combo
+                            # For cross-layer, we encode in place but the C++ engine
+                            # only sees the original tensor. We need to handle this differently.
+                            # For now, encode to internal codec buffers only (for later retrieval)
+                            self.codec.encode_batch(
+                                layer_name=layer_name,
+                                kv_type=kv_type,
+                                source_tensor=source_slice,
+                                source_block_ids=list(range(len(block_ids))),  # Already indexed
+                                dest_buffer=self.encoded_tensors[0],  # Placeholder
+                                dest_start_idx=0,
+                            )
+                
+                logger.info(f"Cross-layer encoding complete: {num_layers} layers × 2 K/V × {total_blocks} blocks")
+                # Note: For cross-layer mode, we skip tensor swap since C++ engine
+                # doesn't support the compressed format. Compression stats are tracked
+                # but data is written uncompressed. Full compression requires
+                # reconstructing a compatible tensor format.
+            else:
+                # Standard format: separate tensors for each layer's K and V
+                for file_idx, block_ids in enumerate(per_file_block_ids):
+                    for tensor_idx in range(len(self.original_tensors)):
+                        layer_name = self.tensor_to_layer_map.get(tensor_idx)
+                        if layer_name:
+                            # Determine if this is K or V tensor (even=K, odd=V)
+                            kv_type = "k" if tensor_idx % 2 == 0 else "v"
+                            
+                            # Encode batch using codec
+                            self.codec.encode_batch(
+                                layer_name=layer_name,
+                                kv_type=kv_type,
+                                source_tensor=self.original_tensors[tensor_idx],
+                                source_block_ids=block_ids,
+                                dest_buffer=self.encoded_tensors[tensor_idx],
+                                dest_start_idx=0,
+                            )
             
-            # Swap engine to use encoded tensors
-            self.engine.set_tensors(self.encoded_tensors)
-            logger.debug("Engine switched to encoded tensors")
+            # Swap engine to use encoded tensors (only for non-cross-layer mode)
+            if not getattr(self, '_cross_layer_skip_tensor_swap', False):
+                self.engine.set_tensors(self.encoded_tensors)
+                logger.debug("Engine switched to encoded tensors")
+            else:
+                logger.debug("Skipping tensor swap for cross-layer mode")
 
         # Submit async PUT transfer (now uses encoded data if RotorQuant enabled)
         success = self.engine.async_store_gpu_blocks(
             job_id, dst_files, per_file_block_ids
         )
         
-        # Restore original tensors after async submission
-        if self.codec and self.tensor_to_layer_map:
+        # Restore original tensors after async submission (skip for cross-layer mode)
+        if self.codec and self.tensor_to_layer_map and not getattr(self, '_cross_layer_skip_tensor_swap', False):
             self.engine.set_tensors(self.original_tensors)
             logger.debug("Engine restored to original tensors")
         if success:
@@ -276,7 +324,8 @@ class StorageToGPUHandler(BaseStorageOffloadingHandler):
         )
 
         # RotorQuant: Set engine to load into encoded tensors (Finding 10)
-        if self.codec and self.tensor_to_layer_map:
+        # Skip for cross-layer mode since we don't support compressed format there yet
+        if self.codec and self.tensor_to_layer_map and not getattr(self, '_cross_layer_skip_tensor_swap', False):
             self.engine.set_tensors(self.encoded_tensors)
             logger.debug(f"Engine switched to encoded tensors for LOAD job {job_id}")
             # Store block IDs for decoding after transfer completes
@@ -287,8 +336,8 @@ class StorageToGPUHandler(BaseStorageOffloadingHandler):
             job_id, src_files, per_file_block_ids
         )
         
-        # Restore original tensors after async submission
-        if self.codec and self.tensor_to_layer_map:
+        # Restore original tensors after async submission (skip for cross-layer mode)
+        if self.codec and self.tensor_to_layer_map and not getattr(self, '_cross_layer_skip_tensor_swap', False):
             self.engine.set_tensors(self.original_tensors)
             logger.debug("Engine restored to original tensors")
         
@@ -379,7 +428,7 @@ class StorageOffloadingHandlers:
         self.encoded_tensors = None  # Store reference to encoded uint8 tensors
         
         threads_per_gpu = min(threads_per_gpu, int(os.cpu_count()))
-        tensors, kernel_block_size, self.tensor_to_layer_map = (
+        tensors, kernel_block_size, self.tensor_to_layer_map, self.cross_layer_info = (
             StorageOffloadingHandlers._get_tensors(kv_caches, attn_backends)
         )
         
@@ -417,6 +466,18 @@ class StorageOffloadingHandlers:
             # Extract unique layer names from tensor mapping
             unique_layer_names = sorted(set(self.tensor_to_layer_map.values()))
             
+            # For cross-layer format, create synthetic layer names for each actual layer
+            if self.cross_layer_info["is_cross_layer"]:
+                num_actual_layers = self.cross_layer_info["num_layers"]
+                # Generate layer names like "layer_0", "layer_1", etc.
+                self.codec_layer_names = [f"layer_{i}" for i in range(num_actual_layers)]
+                logger.info(
+                    f"Cross-layer mode: creating {num_actual_layers} synthetic layer names "
+                    f"for codec (original layer name: {unique_layer_names[0]})"
+                )
+            else:
+                self.codec_layer_names = unique_layer_names
+            
             # Extract KV cache parameters from first tensor
             first_tensor = tensors[0]
             total_blocks = first_tensor.shape[0]  # Total blocks in KV cache
@@ -439,7 +500,7 @@ class StorageOffloadingHandlers:
                 from llmd_fs_backend.isoquant_codec import IsoQuantCodec
                 
                 logger.info(
-                    f"Initializing IsoQuantCodec: {len(unique_layer_names)} layers, "
+                    f"Initializing IsoQuantCodec: {len(self.codec_layer_names)} layers, "
                     f"{total_blocks} total blocks, {gpu_blocks_per_file} blocks/batch, "
                     f"{gpu_block_size} tokens/block, {num_heads} heads, {head_size} head_dim, "
                     f"bits={self.isoquant_config.bits}, mode={self.isoquant_config.mode}"
@@ -447,7 +508,7 @@ class StorageOffloadingHandlers:
                 
                 self.codec = IsoQuantCodec(
                     config=self.isoquant_config,
-                    layer_names=unique_layer_names,
+                    layer_names=self.codec_layer_names,
                     num_blocks=gpu_blocks_per_file,  # Batch size, not total blocks
                     block_size=gpu_block_size,
                     num_heads=num_heads,
@@ -463,14 +524,14 @@ class StorageOffloadingHandlers:
                 from llmd_fs_backend.rotorquant_codec import RotorQuantCodec
                 
                 logger.info(
-                    f"Initializing RotorQuantCodec: {len(unique_layer_names)} layers, "
+                    f"Initializing RotorQuantCodec: {len(self.codec_layer_names)} layers, "
                     f"{total_blocks} total blocks, {gpu_blocks_per_file} blocks/batch, "
                     f"{gpu_block_size} tokens/block, {num_heads} heads, {head_size} head_dim"
                 )
                 
                 self.codec = RotorQuantCodec(
                     config=self.rotorquant_config,
-                    layer_names=unique_layer_names,
+                    layer_names=self.codec_layer_names,
                     num_blocks=gpu_blocks_per_file,  # Batch size, not total blocks
                     block_size=gpu_block_size,
                     num_heads=num_heads,
@@ -486,12 +547,34 @@ class StorageOffloadingHandlers:
             # Create encoded tensor list for C++ engine
             # These are batch-level buffers that will be populated during encoding
             self.encoded_tensors = []
-            for layer_name in unique_layer_names:
-                # Get encoded buffers from codec (one for K, one for V per layer)
-                k_buffer = self.codec.get_encoded_buffer(layer_name, "k")
-                v_buffer = self.codec.get_encoded_buffer(layer_name, "v")
-                self.encoded_tensors.append(k_buffer)
-                self.encoded_tensors.append(v_buffer)
+            
+            if self.cross_layer_info["is_cross_layer"]:
+                # For cross-layer mode, we need encoded buffers that match the
+                # original tensor structure. Since compression changes dimensions,
+                # we create placeholder buffers and compression happens in-codec only.
+                # The actual disk transfer uses original tensors (uncompressed for now).
+                # TODO: Implement proper cross-layer compressed tensor reconstruction
+                for layer_name in self.codec_layer_names:
+                    k_buffer = self.codec.get_encoded_buffer(layer_name, "k")
+                    v_buffer = self.codec.get_encoded_buffer(layer_name, "v")
+                    self.encoded_tensors.append(k_buffer)
+                    self.encoded_tensors.append(v_buffer)
+                
+                # For C++ engine compatibility, use original tensor (no compression swap)
+                self._cross_layer_skip_tensor_swap = True
+                logger.info(
+                    f"Cross-layer mode: codec has {len(self.encoded_tensors)} encoded buffers, "
+                    f"but tensor swap is disabled (compression stats only for now)"
+                )
+            else:
+                # Standard mode: get encoded buffers from codec
+                for layer_name in unique_layer_names:
+                    # Get encoded buffers from codec (one for K, one for V per layer)
+                    k_buffer = self.codec.get_encoded_buffer(layer_name, "k")
+                    v_buffer = self.codec.get_encoded_buffer(layer_name, "v")
+                    self.encoded_tensors.append(k_buffer)
+                    self.encoded_tensors.append(v_buffer)
+                self._cross_layer_skip_tensor_swap = False
             
             quant_type = "IsoQuant" if use_isoquant else "RotorQuant"
             logger.info(
@@ -578,21 +661,33 @@ class StorageOffloadingHandlers:
     def _get_tensors(
         kv_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
-    ) -> tuple[list[torch.Tensor], int, dict[int, str]]:
+    ) -> tuple[list[torch.Tensor], int, dict[int, str], dict]:
         """
         Splits the given KV caches to tensors such that
             each tensor shape is (num_blocks, ...).
 
         Returns:
-            (list_of_kv_cache_tensors, kernel_block_size, tensor_to_layer_map)
+            (list_of_kv_cache_tensors, kernel_block_size, tensor_to_layer_map, cross_layer_info)
             
         The tensor_to_layer_map maps tensor indices to layer names, enabling
         the codec to select the correct quantizer for each tensor.
+        
+        cross_layer_info dict contains:
+            - is_cross_layer: bool - whether cross-layer format is used
+            - num_layers: int - number of layers (if cross-layer)
+            - kv_dim: int - dimension index for K/V split (if cross-layer)
+            - layers_dim: int - dimension index for layers (if cross-layer)
         """
         tensors: list[torch.Tensor] = []
         tensor_to_layer_map: dict[int, str] = {}
         kernel_block_size: int | None = None
         tensor_idx = 0
+        cross_layer_info = {
+            "is_cross_layer": False,
+            "num_layers": 0,
+            "kv_dim": -1,
+            "layers_dim": -1,
+        }
 
         for layer_name, gpu_tensor in kv_caches.items():
             gpu_shape = gpu_tensor.shape
@@ -639,6 +734,19 @@ class StorageOffloadingHandlers:
                 tensor_to_layer_map[tensor_idx] = layer_name
                 tensors.append(gpu_tensor)
                 tensor_idx += 1
+                
+                # If cross-layer, record the info for codec
+                if has_layers_dim:
+                    # Cross-layer shape: (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
+                    # After permutation by stride_order
+                    cross_layer_info["is_cross_layer"] = True
+                    cross_layer_info["num_layers"] = gpu_shape[1]  # num_layers dim
+                    cross_layer_info["layers_dim"] = 1
+                    cross_layer_info["kv_dim"] = 2  # K/V dimension (0=K, 1=V)
+                    logger.info(
+                        f"Detected cross-layer KV cache: shape={gpu_shape}, "
+                        f"num_layers={gpu_shape[1]}, kv_dim=2"
+                    )
 
             try:
                 kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
@@ -662,4 +770,4 @@ class StorageOffloadingHandlers:
             "All KV-cache tensors must have the same block element stride."
         )
         assert kernel_block_size
-        return tensors, kernel_block_size, tensor_to_layer_map
+        return tensors, kernel_block_size, tensor_to_layer_map, cross_layer_info

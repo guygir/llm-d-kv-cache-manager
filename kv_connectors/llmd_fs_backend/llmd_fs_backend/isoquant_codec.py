@@ -240,9 +240,17 @@ class IsoQuantCodec:
         quantizer = key_quantizer if kv_type == "k" else value_quantizer
         
         if quantizer is not None:
-            # Extract blocks as batch: [num_blocks, block_size, num_heads, head_size]
-            block_ids_tensor = torch.tensor(source_block_ids, device=self.device)
-            blocks = source_tensor[block_ids_tensor]  # Batch indexing
+            # Check if source_tensor is already sliced (cross-layer mode) or needs indexing
+            # If source_block_ids starts at 0 and is contiguous, tensor might be pre-sliced
+            if len(source_block_ids) > 0 and source_block_ids[0] == 0 and \
+               source_block_ids == list(range(len(source_block_ids))) and \
+               source_tensor.shape[0] == len(source_block_ids):
+                # Tensor is already sliced to the correct blocks
+                blocks = source_tensor
+            else:
+                # Extract blocks as batch: [num_blocks, block_size, num_heads, head_size]
+                block_ids_tensor = torch.tensor(source_block_ids, device=self.device)
+                blocks = source_tensor[block_ids_tensor]  # Batch indexing
             
             # Reshape for quantization: [N, head_size] where N = blocks * tokens * heads
             original_shape = blocks.shape
