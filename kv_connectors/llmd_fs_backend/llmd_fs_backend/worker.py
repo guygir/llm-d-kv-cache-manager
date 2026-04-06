@@ -56,6 +56,8 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
         tensor_to_layer_map=None,
         original_tensors=None,
         encoded_tensors=None,
+        cross_layer_info=None,
+        cross_layer_skip_tensor_swap=False,
     ):
         """
         Initialize a SingleStorageDirectionOffloadingHandler.
@@ -70,6 +72,8 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
             tensor_to_layer_map: Optional mapping from tensor index to layer name.
             original_tensors: Optional list of original FP16 tensors.
             encoded_tensors: Optional list of encoded uint8 tensors.
+            cross_layer_info: Optional dict with cross-layer KV cache info.
+            cross_layer_skip_tensor_swap: Whether to skip tensor swap for cross-layer mode.
         """
         self.file_mapper = file_mapper
         self.gpu_blocks_per_file = gpu_blocks_per_file
@@ -80,6 +84,8 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
         self.tensor_to_layer_map = tensor_to_layer_map
         self.original_tensors = original_tensors
         self.encoded_tensors = encoded_tensors
+        self.cross_layer_info = cross_layer_info or {"is_cross_layer": False}
+        self._cross_layer_skip_tensor_swap = cross_layer_skip_tensor_swap
 
         # Maps job_id -> (submit_time, transfer_size_bytes).
         # Shared across handlers via StorageOffloadingHandlers.
@@ -615,6 +621,8 @@ class StorageOffloadingHandlers:
             tensor_to_layer_map=self.tensor_to_layer_map,
             original_tensors=self.original_tensors,
             encoded_tensors=self.encoded_tensors,
+            cross_layer_info=self.cross_layer_info,
+            cross_layer_skip_tensor_swap=getattr(self, '_cross_layer_skip_tensor_swap', False),
         )
         self.gpu_to_storage_handler._pending_jobs = pending_jobs
 
@@ -628,6 +636,8 @@ class StorageOffloadingHandlers:
             tensor_to_layer_map=self.tensor_to_layer_map,
             original_tensors=self.original_tensors,
             encoded_tensors=self.encoded_tensors,
+            cross_layer_info=self.cross_layer_info,
+            cross_layer_skip_tensor_swap=getattr(self, '_cross_layer_skip_tensor_swap', False),
         )
         self.storage_to_gpu_handler._pending_jobs = pending_jobs
 
