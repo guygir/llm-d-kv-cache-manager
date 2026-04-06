@@ -210,13 +210,13 @@ class GPUToStorageHandler(BaseStorageOffloadingHandler):
             block_ids=src_spec.block_ids,
         )
 
-        # RotorQuant encoding (Finding 10: Full C++ Integration)
+        # IsoQuant/RotorQuant encoding
         if self.codec and self.tensor_to_layer_map:
-            logger.info(f"RotorQuant encoding {sum(len(ids) for ids in per_file_block_ids)} blocks")
+            logger.info(f"Encoding {sum(len(ids) for ids in per_file_block_ids)} blocks")
             
             # Encode blocks into batch buffers
             for file_idx, block_ids in enumerate(per_file_block_ids):
-                for tensor_idx in range(len(self.engine.tensors)):
+                for tensor_idx in range(len(self.original_tensors)):
                     layer_name = self.tensor_to_layer_map.get(tensor_idx)
                     if layer_name:
                         # Determine if this is K or V tensor (even=K, odd=V)
