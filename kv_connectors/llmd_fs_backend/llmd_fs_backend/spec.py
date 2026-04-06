@@ -26,6 +26,8 @@ from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 from llmd_fs_backend.file_mapper import FileMapper
 from llmd_fs_backend.manager import SharedStorageOffloadingManager
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
+from llmd_fs_backend.rotorquant_config import RotorQuantConfig
+from llmd_fs_backend.isoquant_config import IsoQuantConfig
 from llmd_fs_backend.worker import (
     DEFAULT_MAX_STAGING_MEMORY_GB,
     DEFAULT_READ_PREFERRING_WORKERS_RATIO,
@@ -79,6 +81,28 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             )
         )
 
+        # Parse RotorQuant configuration
+        # If rotorquant is specified, it must be valid - fail hard on errors
+        self.rotorquant_config: RotorQuantConfig | None = None
+        if "rotorquant" in self.extra_config:
+            self.rotorquant_config = RotorQuantConfig.from_dict(
+                self.extra_config["rotorquant"]
+            )
+        
+        # Parse IsoQuant configuration
+        # IsoQuant is mutually exclusive with RotorQuant - only one can be enabled
+        self.isoquant_config: IsoQuantConfig | None = None
+        if "isoquant" in self.extra_config:
+            self.isoquant_config = IsoQuantConfig.from_dict(
+                self.extra_config["isoquant"]
+            )
+            # Warn if both are enabled - IsoQuant takes precedence
+            if self.rotorquant_config and self.rotorquant_config.enabled and self.isoquant_config.enabled:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Both RotorQuant and IsoQuant are enabled. IsoQuant will be used."
+                )
+
         parallel_config = vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
@@ -87,6 +111,17 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
 
         # TODO: use dtype from KVCacheConfig instead of VllmConfig.CacheConfig
         dtype = str(vllm_config.cache_config.cache_dtype).replace("torch.", "")
+        
+        # Determine which quantization config to use (IsoQuant takes precedence)
+        active_quant_config = None
+        quant_type = None
+        if self.isoquant_config and self.isoquant_config.enabled:
+            active_quant_config = self.isoquant_config
+            quant_type = "isoquant"
+        elif self.rotorquant_config and self.rotorquant_config.enabled:
+            active_quant_config = self.rotorquant_config
+            quant_type = "rotorquant"
+        
         self.file_mapper = FileMapper(
             root_dir=shared_storage_path,
             model_name=vllm_config.model_config.model,
@@ -97,6 +132,8 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             pcp_size=pcp_size,
             rank=parallel_config.rank,
             dtype=dtype,
+            rotorquant_config=self.rotorquant_config,
+            isoquant_config=self.isoquant_config,
         )
 
     def get_manager(self) -> OffloadingManager:
@@ -119,6 +156,9 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 kv_caches=kv_caches,
                 threads_per_gpu=self.threads_per_gpu,
                 max_staging_memory_gb=self.max_staging_memory_gb,
+                rotorquant_config=self.rotorquant_config,
+                isoquant_config=self.isoquant_config,
+                vllm_config=self.vllm_config,
             )
 
         assert self._handlers is not None

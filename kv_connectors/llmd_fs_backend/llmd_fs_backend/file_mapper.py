@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
+from .rotorquant_config import RotorQuantConfig
+from .isoquant_config import IsoQuantConfig
+
 
 class FileMapper:
     """
@@ -29,6 +34,8 @@ class FileMapper:
         pcp_size: int,
         rank: int,
         dtype: str,
+        rotorquant_config: Optional[RotorQuantConfig] = None,
+        isoquant_config: Optional[IsoQuantConfig] = None,
     ):
         """
         Initialize the file mapper for a specific worker.
@@ -52,6 +59,8 @@ class FileMapper:
             pcp_size: Number of prefill context parallel groups.
             rank: Worker rank.
             dtype: Torch dtype of the KV-cache tensors.
+            rotorquant_config: Optional RotorQuant configuration for compression.
+            isoquant_config: Optional IsoQuant configuration for compression.
 
         Returns:
             Base path under which KV-cache files are stored or loaded.
@@ -65,12 +74,19 @@ class FileMapper:
             f"/rank_{rank}"
             f"/{dtype}"
         )
+        self.rotorquant_config = rotorquant_config
+        self.isoquant_config = isoquant_config
 
     def get_file_name(self, block_hash: int | bytes) -> str:
         """
         Return the file path for a KV block.
         The path is built using hash-based subdirectories:
-        <base>/<hhh>/<hh>/<hash>.bin, to limit directory fan-out.
+        <base>/<hhh>/<hh>/<hash>.bin (or .rqbin/.iqbin for compressed files).
+
+        File extensions:
+        - .bin: Uncompressed FP16 tensors
+        - .rqbin: RotorQuant compressed (Clifford algebra)
+        - .iqbin: IsoQuant compressed (quaternion-based, recommended)
 
         Args:
             block_hash: Hash identifying the KV-cache block (int or bytes).
@@ -84,4 +100,14 @@ class FileMapper:
 
         block_hash_hex = f"{block_hash & ((1 << 64) - 1):016x}"
         subfolder1, subfolder2 = block_hash_hex[:3], block_hash_hex[3:5]
-        return f"{self.base_path}/{subfolder1}/{subfolder2}/{block_hash_hex}.bin"
+        
+        # Determine file extension based on active quantization config
+        # IsoQuant takes precedence over RotorQuant
+        if self.isoquant_config and self.isoquant_config.enabled:
+            extension = ".iqbin"
+        elif self.rotorquant_config and self.rotorquant_config.enabled:
+            extension = ".rqbin"
+        else:
+            extension = ".bin"
+        
+        return f"{self.base_path}/{subfolder1}/{subfolder2}/{block_hash_hex}{extension}"

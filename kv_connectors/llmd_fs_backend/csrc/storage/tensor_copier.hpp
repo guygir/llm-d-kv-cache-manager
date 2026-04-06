@@ -29,6 +29,11 @@ class TensorCopier {
                    const std::vector<int64_t>& block_ids_list,
                    bool is_store);
 
+  // Set new tensor references (for RotorQuant encoded buffers)
+  void set_tensors(std::vector<torch::Tensor>& new_tensors) {
+    m_gpu_tensors = new_tensors;
+  }
+
  private:
   // GPU tensor list
   std::vector<torch::Tensor> m_gpu_tensors;

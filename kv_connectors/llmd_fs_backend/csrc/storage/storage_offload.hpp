@@ -69,6 +69,10 @@ class StorageOffloadEngine {
   std::vector<std::pair<int, bool>> get_finished();
   // Wait for all tasks in the specified job to complete
   void wait_job(int job_id);
+  // Set new tensor references (for RotorQuant encoded buffers)
+  void set_tensors(std::vector<torch::Tensor>& new_tensors) {
+    m_tensor_copier.set_tensors(new_tensors);
+  }
   // Async GPU -> Storage transfer (PUT)
   bool async_store_gpu_blocks(int job_id,
                               std::vector<std::string> dst_files,

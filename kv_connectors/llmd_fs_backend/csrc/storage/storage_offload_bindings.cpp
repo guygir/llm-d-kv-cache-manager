@@ -58,6 +58,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            "Return a list of finished job IDs and their success status.\n\n"
            "Each entry is a (job_id, success) tuple.")
 
+      .def("set_tensors",
+           &StorageOffloadEngine::set_tensors,
+           py::arg("new_tensors"),
+           "Set new tensor references for the engine.\n\n"
+           "Used by RotorQuant to swap between FP16 KV cache tensors and "
+           "uint8 encoded buffers.\n\n"
+           "Args:\n"
+           "  new_tensors: List of GPU tensors to use for transfers.")
+
       .def("async_store_gpu_blocks",
            &StorageOffloadEngine::async_store_gpu_blocks,
            py::arg("job_id"),
