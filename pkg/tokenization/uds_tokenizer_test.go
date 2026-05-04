@@ -40,6 +40,8 @@ type mockTokenizationServer struct {
 	chatError       bool
 	initialized     map[string]bool
 	mmFeatures      *tokenizerpb.MultiModalFeatures
+	mmMetadata      *tokenizerpb.MultiModalMetadataResponse
+	mmMetadataReq   *tokenizerpb.MultiModalMetadataRequest
 }
 
 func newMockTokenizationServer() *mockTokenizationServer {
@@ -159,6 +161,17 @@ func (m *mockTokenizationServer) RenderCompletion(
 	}, nil
 }
 
+func (m *mockTokenizationServer) GetMultiModalMetadata(
+	_ context.Context,
+	req *tokenizerpb.MultiModalMetadataRequest,
+) (*tokenizerpb.MultiModalMetadataResponse, error) {
+	m.mmMetadataReq = req
+	if m.mmMetadata != nil {
+		return m.mmMetadata, nil
+	}
+	return &tokenizerpb.MultiModalMetadataResponse{Success: true}, nil
+}
+
 // UdsTokenizerTestSuite holds the test suite state.
 type UdsTokenizerTestSuite struct {
 	suite.Suite
@@ -226,6 +239,8 @@ func (s *UdsTokenizerTestSuite) SetupTest() {
 	s.mockServer.initializeError = false
 	s.mockServer.tokenizeError = false
 	s.mockServer.chatError = false
+	s.mockServer.mmMetadata = nil
+	s.mockServer.mmMetadataReq = nil
 	// Clear initialized models to ensure test isolation
 	s.mockServer.initialized = make(map[string]bool)
 	// Re-initialize the shared tokenizer's model
@@ -288,6 +303,20 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_ModelNotInMap() {
 	tokenizer, err := NewUdsTokenizer(s.T().Context(), config, "unknown-model")
 	s.Assert().Error(err)
 	s.Assert().Nil(tokenizer)
+}
+
+func (s *UdsTokenizerTestSuite) TestNewUdsTokenizer_SkipInitialize() {
+	config := &UdsTokenizerConfig{
+		SocketFile:     s.socketPath,
+		SkipInitialize: true,
+		SkipWarmup:     true,
+	}
+
+	tokenizer, err := NewUdsTokenizer(s.T().Context(), config, "not-initialized")
+	s.Require().NoError(err)
+	s.Require().NotNil(tokenizer)
+	defer tokenizer.Close()
+	s.Assert().False(s.mockServer.initialized["not-initialized"])
 }
 
 func (s *UdsTokenizerTestSuite) TestUdsTokenizer_Render() {
@@ -384,6 +413,37 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatWithMultiModalFeature
 	s.Assert().Equal(100, placeholders[0].Length)
 	s.Assert().Equal(120, placeholders[1].Offset)
 	s.Assert().Equal(80, placeholders[1].Length)
+}
+
+func (s *UdsTokenizerTestSuite) TestUdsTokenizer_GetMultiModalMetadata() {
+	s.mockServer.mmMetadata = &tokenizerpb.MultiModalMetadataResponse{
+		Success: true,
+		Items: []*tokenizerpb.MultiModalMetadataItem{{
+			Modality:              "image",
+			MmHash:                "hash-image",
+			PlaceholderCount:      64,
+			Width:                 224,
+			Height:                224,
+			ExactHash:             true,
+			ExactPlaceholderCount: true,
+			Method:                "vllm-hash+lightweight-count",
+		}},
+	}
+
+	resp, err := s.tokenizer.GetMultiModalMetadata(&MultiModalMetadataRequest{
+		HashMode: "vllm",
+		Items: []MultiModalMetadataItemRequest{{
+			Modality: "image",
+			URL:      "https://example.com/a.png",
+		}},
+	})
+
+	s.Require().NoError(err)
+	s.Require().Len(resp.Items, 1)
+	s.Assert().Equal("hash-image", resp.Items[0].Hash)
+	s.Assert().Equal(64, resp.Items[0].PlaceholderCount)
+	s.Require().NotNil(s.mockServer.mmMetadataReq)
+	s.Assert().Equal("https://example.com/a.png", s.mockServer.mmMetadataReq.Items[0].Url)
 }
 
 func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatTextOnlyNoFeatures() {

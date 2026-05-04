@@ -183,6 +183,45 @@ message RenderCompletionResponse {
   string error_message = 4;      // Error message if the request failed
 }
 
+// MultiModalMetadataRequest asks the sidecar for lightweight multimodal metadata
+// without requiring full chat-template rendering or tokenization.
+message MultiModalMetadataRequest {
+  string model_name = 1;                            // Model whose processor config defines placeholder expansion
+  repeated MultiModalMetadataItemRequest items = 2; // Multimodal items to inspect
+  string processor_kwargs_json = 3;                 // Optional processor kwargs that participate in hashing/counting
+  bool allow_preprocess_fallback = 4;               // Allow CPU preprocessor/render fallback for unsupported models
+  string hash_mode = 5;                             // vllm, uuid, or stable-identifier
+}
+
+// MultiModalMetadataItemRequest describes one multimodal input item.
+message MultiModalMetadataItemRequest {
+  string modality = 1; // "image", "video", "audio"; only image is currently supported
+  string url = 2;      // http(s), file, or data URI
+  string data = 3;     // raw/base64 data when no URL is provided
+  string uuid = 4;     // vLLM-compatible client-provided UUID, when available
+  string mime_type = 5;
+}
+
+// MultiModalMetadataResponse contains one result per requested item.
+message MultiModalMetadataResponse {
+  repeated MultiModalMetadataItem items = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+// MultiModalMetadataItem is lightweight multimodal metadata for one item.
+message MultiModalMetadataItem {
+  string modality = 1;
+  string mm_hash = 2;
+  int32 placeholder_count = 3;
+  int32 width = 4;
+  int32 height = 5;
+  bool exact_hash = 6;
+  bool exact_placeholder_count = 7;
+  string method = 8;
+  string error = 9;
+}
+
 // TokenizationService defines the gRPC service for tokenization
 service TokenizationService {
   // Tokenize converts a text input to token IDs
@@ -201,4 +240,8 @@ service TokenizationService {
   // RenderCompletion renders an OpenAI completion request via OpenAIServingRender,
   // returning the rendered output for the given prompt
   rpc RenderCompletion(RenderCompletionRequest) returns (RenderCompletionResponse);
+
+  // GetMultiModalMetadata returns per-item multimodal hashes and placeholder counts
+  // through a lightweight metadata path where supported.
+  rpc GetMultiModalMetadata(MultiModalMetadataRequest) returns (MultiModalMetadataResponse);
 }

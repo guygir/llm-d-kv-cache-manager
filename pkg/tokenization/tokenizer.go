@@ -30,6 +30,45 @@ type MultiModalFeatures struct {
 	MMPlaceholders map[string][]kvblock.PlaceholderRange
 }
 
+// MultiModalMetadataRequest asks the tokenizer sidecar for lightweight
+// multimodal item hashes and placeholder counts.
+type MultiModalMetadataRequest struct {
+	ModelName               string
+	Items                   []MultiModalMetadataItemRequest
+	ProcessorKwargsJSON     string
+	AllowPreprocessFallback bool
+	HashMode                string
+}
+
+// MultiModalMetadataItemRequest describes one multimodal request item.
+type MultiModalMetadataItemRequest struct {
+	Modality string
+	URL      string
+	Data     string
+	UUID     string
+	MIMEType string
+}
+
+// MultiModalMetadataResponse contains one metadata result per requested item.
+type MultiModalMetadataResponse struct {
+	Items        []MultiModalMetadataItem
+	Success      bool
+	ErrorMessage string
+}
+
+// MultiModalMetadataItem is lightweight metadata for one multimodal item.
+type MultiModalMetadataItem struct {
+	Modality              string
+	Hash                  string
+	PlaceholderCount      int
+	Width                 int
+	Height                int
+	ExactHash             bool
+	ExactPlaceholderCount bool
+	Method                string
+	Error                 string
+}
+
 // Tokenizer interface defines the methods for tokenization.
 type Tokenizer interface {
 	RenderChat(*types.RenderChatRequest) ([]uint32, *MultiModalFeatures, error)

@@ -54,11 +54,20 @@ service TokenizationService {
   // Tokenize converts a text input to token IDs
   rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
 
-  // RenderChatTemplate renders a chat template with the given messages
+  // Deprecated: use RenderChatCompletion instead.
   rpc RenderChatTemplate(ChatTemplateRequest) returns (ChatTemplateResponse);
 
   // InitializeTokenizer initializes the tokenizer for a specific model
   rpc InitializeTokenizer(InitializeTokenizerRequest) returns (InitializeTokenizerResponse);
+
+  // RenderChatCompletion renders and tokenizes an OpenAI chat completion request.
+  rpc RenderChatCompletion(RenderChatCompletionRequest) returns (RenderChatCompletionResponse);
+
+  // RenderCompletion renders and tokenizes an OpenAI completion request.
+  rpc RenderCompletion(RenderCompletionRequest) returns (RenderCompletionResponse);
+
+  // GetMultiModalMetadata returns per-item hashes and placeholder counts without token IDs.
+  rpc GetMultiModalMetadata(MultiModalMetadataRequest) returns (MultiModalMetadataResponse);
 }
 ```
 
@@ -107,6 +116,18 @@ Request:
 Response:
 - `success`: Whether the initialization was successful
 - `error_message`: Error message if the initialization failed
+
+### GetMultiModalMetadata Method
+
+Returns lightweight multimodal metadata for scheduler-side weighted encoder-cache affinity. The request is batched per OpenAI request and contains the model name, optional processor kwargs, hash mode, and one or more image items.
+
+The sidecar attempts exact, vLLM-compatible metadata without full chat rendering:
+- `uuid` mode uses client-provided multimodal UUIDs as exact identity.
+- `vllm` mode attempts vLLM `MultiModalHasher` semantics after image inspection.
+- Placeholder counts are derived from image dimensions plus model/processor config for supported families, including fixed-count models, Qwen smart-resize families, InternVL target-ratio style models, and processor helper APIs when present.
+- Unsupported families return an explicit unsupported item; callers should fall back according to policy.
+
+The response includes `exact_hash` and `exact_placeholder_count` flags. Callers should not treat stable identifiers or unsupported counters as exact vLLM metadata unless explicitly configured to accept approximate routing.
 
 ## HTTP Endpoints
 

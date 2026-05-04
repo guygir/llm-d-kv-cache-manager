@@ -40,6 +40,11 @@ import (
 type UdsTokenizerConfig struct {
 	SocketFile string `json:"socketFile"` // UDS socket path (production) or host:port for TCP (testing only)
 	UseTCP     bool   `json:"useTCP"`     // If true, use TCP instead of UDS (for testing only, default: false)
+	// SkipInitialize skips InitializeTokenizer. Use this for lightweight sidecar
+	// RPCs that do not need renderer/tokenizer startup.
+	SkipInitialize bool `json:"skipInitialize,omitempty"`
+	// SkipWarmup skips the RenderChat warmup after InitializeTokenizer.
+	SkipWarmup bool `json:"skipWarmup,omitempty"`
 
 	// ModelTokenizerMap maps a model name to the location of its tokenizer data.
 	//
@@ -139,14 +144,18 @@ func NewUdsTokenizer(ctx context.Context, config *UdsTokenizerConfig, modelName 
 		udsTokenizer.Close()
 	}()
 
-	// Initialize the tokenizer for the specified model
-	if err := udsTokenizer.initializeTokenizerForModel(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize tokenizer for model %s: %w", modelName, err)
-	}
+	if !config.SkipInitialize {
+		// Initialize the tokenizer for the specified model
+		if err := udsTokenizer.initializeTokenizerForModel(ctx); err != nil {
+			return nil, fmt.Errorf("failed to initialize tokenizer for model %s: %w", modelName, err)
+		}
 
-	// Warm up the renderer with a minimal request to force any lazy
-	// downloads (e.g. image processor configs for multimodal models).
-	udsTokenizer.warmup(ctx)
+		// Warm up the renderer with a minimal request to force any lazy
+		// downloads (e.g. image processor configs for multimodal models).
+		if !config.SkipWarmup {
+			udsTokenizer.warmup(ctx)
+		}
+	}
 
 	return udsTokenizer, nil
 }
@@ -394,6 +403,67 @@ func convertProtoFeatures(pf *tokenizerpb.MultiModalFeatures) *MultiModalFeature
 	}
 
 	return features
+}
+
+// GetMultiModalMetadata asks the UDS sidecar for lightweight per-item
+// multimodal metadata without returning rendered token IDs.
+func (u *UdsTokenizer) GetMultiModalMetadata(req *MultiModalMetadataRequest) (*MultiModalMetadataResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	if req == nil {
+		return nil, fmt.Errorf("multimodal metadata request is nil")
+	}
+
+	modelName := req.ModelName
+	if modelName == "" {
+		modelName = u.model
+	}
+
+	items := make([]*tokenizerpb.MultiModalMetadataItemRequest, 0, len(req.Items))
+	for _, item := range req.Items {
+		items = append(items, &tokenizerpb.MultiModalMetadataItemRequest{
+			Modality: item.Modality,
+			Url:      item.URL,
+			Data:     item.Data,
+			Uuid:     item.UUID,
+			MimeType: item.MIMEType,
+		})
+	}
+
+	resp, err := u.client.GetMultiModalMetadata(ctx, &tokenizerpb.MultiModalMetadataRequest{
+		ModelName:               modelName,
+		Items:                   items,
+		ProcessorKwargsJson:     req.ProcessorKwargsJSON,
+		AllowPreprocessFallback: req.AllowPreprocessFallback,
+		HashMode:                req.HashMode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("gRPC GetMultiModalMetadata request failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("multimodal metadata failed: %s", resp.ErrorMessage)
+	}
+
+	out := &MultiModalMetadataResponse{
+		Items:        make([]MultiModalMetadataItem, 0, len(resp.Items)),
+		Success:      resp.Success,
+		ErrorMessage: resp.ErrorMessage,
+	}
+	for _, item := range resp.Items {
+		out.Items = append(out.Items, MultiModalMetadataItem{
+			Modality:              item.Modality,
+			Hash:                  item.MmHash,
+			PlaceholderCount:      int(item.PlaceholderCount),
+			Width:                 int(item.Width),
+			Height:                int(item.Height),
+			ExactHash:             item.ExactHash,
+			ExactPlaceholderCount: item.ExactPlaceholderCount,
+			Method:                item.Method,
+			Error:                 item.Error,
+		})
+	}
+	return out, nil
 }
 
 func (u *UdsTokenizer) Type() string {

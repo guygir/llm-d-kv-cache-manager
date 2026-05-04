@@ -30,6 +30,7 @@ import tokenizerpb.tokenizer_pb2_grpc as tokenizer_pb2_grpc
 from google.protobuf.json_format import MessageToDict
 from tokenizer_service.tokenizer import TokenizerService
 from tokenizer_service.renderer import RendererService
+from tokenizer_service.multimodal_metadata import MultiModalMetadataService
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 
@@ -40,6 +41,7 @@ class TokenizationServiceServicer(tokenizer_pb2_grpc.TokenizationServiceServicer
     ):
         self.tokenizer_service = tokenizer_service
         self.renderer_service = renderer_service
+        self.multimodal_metadata_service = MultiModalMetadataService()
         logging.info("TokenizationServiceServicer initialized")
 
     async def Tokenize(
@@ -129,6 +131,14 @@ class TokenizationServiceServicer(tokenizer_pb2_grpc.TokenizationServiceServicer
             )
         except Exception as e:
             logging.warning("Tokenizer load failed (non-critical): %s", e)
+
+        try:
+            await asyncio.to_thread(
+                self.multimodal_metadata_service.prewarm_model,
+                request.model_name,
+            )
+        except Exception as e:
+            logging.warning("MM metadata prewarm failed (non-critical): %s", e)
 
         return tokenizer_pb2.InitializeTokenizerResponse(success=True)
 
@@ -237,6 +247,55 @@ class TokenizationServiceServicer(tokenizer_pb2_grpc.TokenizationServiceServicer
         except Exception as e:
             logging.error(f"RenderCompletion failed: {e}", exc_info=True)
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+    async def GetMultiModalMetadata(
+        self,
+        request: tokenizer_pb2.MultiModalMetadataRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tokenizer_pb2.MultiModalMetadataResponse:
+        """Return lightweight multimodal hashes and placeholder counts."""
+        try:
+            item_dicts = [
+                {
+                    "modality": item.modality,
+                    "url": item.url,
+                    "data": item.data,
+                    "uuid": item.uuid,
+                    "mime_type": item.mime_type,
+                }
+                for item in request.items
+            ]
+            results = await asyncio.to_thread(
+                self.multimodal_metadata_service.get_metadata,
+                request.model_name,
+                item_dicts,
+                request.processor_kwargs_json,
+                request.allow_preprocess_fallback,
+                request.hash_mode,
+            )
+            return tokenizer_pb2.MultiModalMetadataResponse(
+                success=True,
+                items=[
+                    tokenizer_pb2.MultiModalMetadataItem(
+                        modality=item.modality,
+                        mm_hash=item.mm_hash,
+                        placeholder_count=item.placeholder_count,
+                        width=item.width,
+                        height=item.height,
+                        exact_hash=item.exact_hash,
+                        exact_placeholder_count=item.exact_placeholder_count,
+                        method=item.method,
+                        error=item.error,
+                    )
+                    for item in results
+                ],
+            )
+        except Exception as e:
+            logging.error(f"GetMultiModalMetadata failed: {e}", exc_info=True)
+            return tokenizer_pb2.MultiModalMetadataResponse(
+                success=False,
+                error_message=str(e),
+            )
 
 
 def create_grpc_server(
