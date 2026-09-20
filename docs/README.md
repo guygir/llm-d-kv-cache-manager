@@ -31,3 +31,11 @@ To implement this vision, the KVCache-Manager incorporates proactive cache place
 and cluster-level cache APIs - bridging gaps in current serving stacks where KVCache management and utilization is 
 not yet treated as a first-class concern.
 
+## Docs
+
+- [Architecture](architecture.md) — indexer read/write path and scoring.
+- [Context-aware routing](context-aware-routing.md) — session / prefix / KV-cache awareness.
+- [Jev vs regular classifiers](jev.md) — System One decisions, why criteria-in-the-question
+  is the new part, and how that does (and does not) affect this KV-cache stack.
+  Running example: [`examples/jev-vs-classifier`](../examples/jev-vs-classifier/README.md).
+

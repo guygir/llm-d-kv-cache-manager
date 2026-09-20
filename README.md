@@ -57,4 +57,7 @@ For a detailed architecture, refer to the [architecture](docs/architecture.md) d
 - [KVCache Aware Scorer](examples/kv-cache-aware-scorer/README.md): 
   - A reference implementation of integrating the `kvcache.Indexer` module in 
   [llm-d-inference-scheduler](https://github.com/llm-d/llm-d-inference-scheduler) in a KVCache aware scorer.
+- [Jev vs classifiers](examples/jev-vs-classifier/README.md):
+  - A running comparison of a frozen-label classifier, LLM JSON mode, and a
+    Jev-shaped System One request. Guide: [docs/jev.md](docs/jev.md).
 
