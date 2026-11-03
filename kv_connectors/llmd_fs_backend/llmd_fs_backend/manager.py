@@ -60,7 +60,7 @@ class SharedStorageOffloadingManager(OffloadingManager):
             InodePins(
                 self.storage_ttl_seconds,
                 idle=policy_prefix(
-                    (extra_config or {}).get("storage_ttl_policy", "fixed")
+                    (extra_config or {}).get("storage_ttl_policy", "idle")
                 )
                 == IDLE_PREFIX,
             )

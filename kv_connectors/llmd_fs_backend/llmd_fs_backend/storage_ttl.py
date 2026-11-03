@@ -30,7 +30,7 @@ def validate_seconds(value):
     return value
 
 
-def policy_prefix(value="fixed"):
+def policy_prefix(value="idle"):
     if value not in ("fixed", "idle"):
         raise ValueError("storage_ttl_policy must be fixed or idle")
     return IDLE_PREFIX if value == "idle" else PREFIX

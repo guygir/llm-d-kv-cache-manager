@@ -11,9 +11,11 @@ pytestmark = pytest.mark.no_cuda_required
 
 
 @pytest.mark.parametrize("policy, prefix", [("fixed", "v1"), ("idle", "v2-idle")])
-def test_allowlist_is_opt_in_and_fixed_default_unchanged(tmp_path, policy, prefix):
+def test_allowlist_is_opt_in_with_explicit_retention_policy(tmp_path, policy, prefix):
     old = make_spec(tmp_path / "fixed", {"storage_ttl_seconds": 30})
     assert type(old.get_manager()) is SharedStorageOffloadingManager
+    assert old.get_manager()._ttl_pins.idle
+    assert "/.llmd-ttl-v2-idle-30/" in old.file_mapper.base_path
     new = make_spec(
         tmp_path / "mixed",
         {

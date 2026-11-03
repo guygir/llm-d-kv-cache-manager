@@ -26,7 +26,7 @@ class RequestStorageTTLManager(OffloadingManager):
         self.routes = RequestPolicyRoutes(
             policy_mappers,
             default,
-            prefix=policy_prefix(extra_config.get("storage_ttl_policy", "fixed")),
+            prefix=policy_prefix(extra_config.get("storage_ttl_policy", "idle")),
         )
         self._tokens = {}
         self._jobs = defaultdict(lambda: defaultdict(lambda: defaultdict(deque)))

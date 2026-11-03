@@ -27,7 +27,9 @@ def make(tmp_path):
             get_file_name=lambda k, p=parent: str(p / (k.hex() + ".bin")),
         )
     worker = SimpleNamespace(get_file_name=lambda k: str(tmp_path / "worker" / k.hex()))
-    return RequestStorageTTLManager(worker, maps, {}, 30), maps
+    return RequestStorageTTLManager(
+        worker, maps, {"storage_ttl_policy": "fixed"}, 30
+    ), maps
 
 
 def ctx(name, ttl=30):

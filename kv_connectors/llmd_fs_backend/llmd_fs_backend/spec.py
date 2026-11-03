@@ -111,7 +111,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
 
         ttl = validate_seconds(self.extra_config.get("storage_ttl_seconds"))
         self.storage_ttl_prefix = policy_prefix(
-            self.extra_config.get("storage_ttl_policy", "fixed")
+            self.extra_config.get("storage_ttl_policy", "idle")
         )
         allowed = self.extra_config.get("storage_ttl_allowlist")
         self.storage_ttl_allowlist = (

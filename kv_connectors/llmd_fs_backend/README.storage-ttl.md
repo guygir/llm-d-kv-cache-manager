@@ -1,10 +1,18 @@
-# Fixed storage TTL (experimental implementation)
+# Storage TTL retention (experimental implementation)
 
-This opt-in feature gives each stored generation a fixed maximum lifetime. It is
-separate from PVC pressure eviction and its minimum idle-age protection. Reads
-and duplicate stores do not extend the deadline. Expired lookups miss; inference
-can recompute. Already accepted storage reads may finish. Removing the pathname
-and returning allocated space are asynchronous; an open reader can delay frees.
+TTL is disabled unless `storage_ttl_seconds` is configured. Once configured,
+`storage_ttl_policy` selects one of two policies:
+
+- `"idle"` (default): TTL is cleanup eligibility after the last accepted storage
+  access. Matching bytes still present after the deadline remain reusable; an
+  accepted hit renews retention without rewriting bytes or changing inode/mtime.
+- `"fixed"`: TTL is a maximum publication lifetime. Reads and duplicate stores
+  do not extend it. New lookups after the deadline miss and may recompute.
+
+Both policies are independent of pressure eviction. Already accepted reads may
+finish after unlink. Removing a pathname and returning allocated space are
+asynchronous; open readers can delay frees. No configured TTL means legacy
+non-TTL behavior, regardless of this new policy default.
 
 The initial implementation supports Linux procfs, the native POSIX CPU-staging
 backend and one worker rank. GDS, object storage and multi-rank TTL configurations
@@ -23,18 +31,17 @@ Configure the existing OffloadingConnector with:
     "spec_module_path": "llmd_fs_backend.spec",
     "shared_storage_path": "/kv-cache",
     "track_file_access": true,
-    "storage_ttl_seconds": 3600
+    "storage_ttl_seconds": 3600,
+    "storage_ttl_policy": "idle"
   }
 }
 ```
 
-The connector uses a separate `.llmd-ttl-v1-3600` namespace under the configured
-root. Changing the configured duration creates a separate policy namespace;
-legacy files are not retroactively reinterpreted. The lifetime origin is the
-immutable file mtime established immediately before publication. Accurate access
-tracking updates atime and preserves that mtime. A successful new publication
-after expiry creates a new generation and deadline; TTL does not prohibit future
-recaching of the same content.
+Idle mode uses `.llmd-ttl-v2-idle-3600`; explicit fixed mode uses
+`.llmd-ttl-v1-3600`. Policy and duration select separate namespaces. Existing v1
+files retain fixed semantics and are not reinterpreted as idle files. Switching
+policy starts a separate cache population. Idle deadlines use atime + TTL;
+fixed deadlines use the publication mtime + TTL. Access tracking preserves mtime.
 
 A request may confirm the namespace policy through vLLM's existing transport:
 
@@ -79,7 +86,7 @@ or promise globally ordered events across storage generations.
 
 ## Optional per-request lifetime allowlist
 
-Fixed `storage_ttl_seconds` behavior remains the default. To let a caller choose
+One server-selected lifetime is the default. To let a caller choose
 among explicit server policies, configure the existing spec with both a default
 and an allowlist:
 
@@ -132,11 +139,11 @@ This branch adds TTL only on top of the recency/backpressure foundation in
 PR #741. It contains no deletion work-rate or file-attempt ceilings, adaptive
 capacity controller, or benchmark-only C++ batching helper. TTL remains opt-in.
 
-## Renewable idle retention (new local revision)
+## Renewable idle retention and delayed retries
 
-Set `storage_ttl_policy: "idle"` alongside `storage_ttl_seconds` (and the optional
-allowlist) to use `.llmd-ttl-v2-idle-N` namespaces. The existing fixed policy and
-v1 namespace keep their meaning; the option defaults to `"fixed"` for compatibility.
+The default `storage_ttl_policy: "idle"` uses `.llmd-ttl-v2-idle-N` namespaces
+when `storage_ttl_seconds` is configured. Select `"fixed"` explicitly for the
+non-renewing v1 publication deadline. Both also support the optional allowlist.
 An idle hit may reuse matching bytes still on disk after the former deadline.
 Accepting the hit opens/pins the inode and refreshes atime under the same native
 stripe mutex and POSIX record lock used by stores. KV bytes, inode and publication
