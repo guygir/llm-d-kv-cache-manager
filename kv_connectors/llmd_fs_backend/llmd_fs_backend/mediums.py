@@ -23,14 +23,20 @@ class SharedStorageLoadStoreSpec(LoadStoreSpec):
     Stores offload keys internally as a list. ``source_paths`` is an optional
     internal worker-path mapping for either transfer direction: loads can point
     to pinned FDs; stores can target a server-selected TTL namespace. It must
-    never be populated from arbitrary client-supplied paths.
+    never be populated from arbitrary client-supplied paths. ``ttl_seconds``
+    carries a server-validated shared-idle store lifetime on this job; it is
+    never a process-global worker setting.
     """
 
     def __init__(
-        self, keys: Iterable[OffloadKey], source_paths: dict[str, str] | None = None
+        self,
+        keys: Iterable[OffloadKey],
+        source_paths: dict[str, str] | None = None,
+        ttl_seconds: int | None = None,
     ):
         self.keys = list(keys)
         self.source_paths = source_paths
+        self.ttl_seconds = ttl_seconds
 
     def __repr__(self) -> str:
         return repr(self.keys)

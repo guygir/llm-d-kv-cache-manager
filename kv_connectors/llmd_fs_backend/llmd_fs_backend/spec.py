@@ -31,7 +31,12 @@ from llmd_fs_backend.file_mapper import FileMapper
 from llmd_fs_backend.manager import SharedStorageOffloadingManager
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
 from llmd_fs_backend.request_routing import validate_request_policies
-from llmd_fs_backend.storage_ttl import policy_prefix, validate_seconds
+from llmd_fs_backend.storage_ttl import (
+    policy_namespace,
+    policy_prefix,
+    validate_seconds,
+    validate_shared_idle_root,
+)
 from llmd_fs_backend.worker import (
     DEFAULT_MAX_STAGING_MEMORY_GB,
     DEFAULT_MAX_WRITE_QUEUED_SECONDS,
@@ -139,8 +144,16 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             if parallel_config.world_size != 1:
                 raise ValueError("Fixed storage TTL supports one worker rank only")
             shared_storage_path = str(
-                namespace_root / (self.storage_ttl_prefix + str(ttl))
+                namespace_root
+                / policy_namespace(
+                    ttl, self.extra_config.get("storage_ttl_policy", "idle")
+                )
             )
+        if (
+            ttl is not None
+            and self.extra_config.get("storage_ttl_policy", "idle") == "idle"
+        ):
+            validate_shared_idle_root(shared_storage_path)
         self.file_mapper = FileMapper.from_vllm_config(
             root_dir=shared_storage_path,
             vllm_config=vllm_config,
@@ -161,7 +174,9 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                     mapper = copy.copy(self.file_mapper)
                     mapper.base_path = str(
                         self.storage_namespace_root
-                        / (self.storage_ttl_prefix + str(seconds))
+                        / policy_namespace(
+                            seconds, self.extra_config.get("storage_ttl_policy", "idle")
+                        )
                         / Path(self.file_mapper.base_path).name
                     )
                     mapper.write_run_config()

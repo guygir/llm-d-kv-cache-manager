@@ -275,7 +275,8 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
     std::vector<int> group_indices,
     std::vector<std::string> dst_files,
     std::vector<std::vector<int64_t>> all_block_ids,
-    std::vector<int> head_offsets) {
+    std::vector<int> head_offsets,
+    int64_t ttl_seconds) {
   TORCH_CHECK(group_indices.size() == dst_files.size(),
               "group_indices and dst_files must have the same length");
   TORCH_CHECK(head_offsets.size() == dst_files.size(),
@@ -326,7 +327,8 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
          group_idx,
          head_offset,
          job_state,
-         gpu_kvs_ready_event]() -> bool {
+         gpu_kvs_ready_event,
+         ttl_seconds]() -> bool {
           // Check if job was cancelled (e.g. request preempted) before
           // starting any work — bail immediately to unblock wait_job().
           if (job_state->cancelled) {
@@ -338,8 +340,12 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
             StorageTTLLock ttl_lock(dst_file);
             // Idle stores renew; fixed stores require a live generation.
             if (std::ifstream(dst_file).good() &&
-                (ttl_lock.idle() || !ttl_lock.expired(dst_file))) {
-              if (m_track_file_access) {
+                (ttl_lock.idle() || !ttl_lock.expired(dst_file)) &&
+                (!ttl_lock.shared_idle() ||
+                 renew_shared_idle_path(dst_file, ttl_seconds))) {
+              if (ttl_lock.shared_idle()) {
+                // Deadline renewal already refreshed atime under the guard.
+              } else if (m_track_file_access) {
                 refresh_file_access(dst_file);
               } else {
                 FileIO::update_atime(
@@ -371,7 +377,11 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
                 dst_file,
                 " blocks:",
                 block_ids.size());
-            if (success && m_track_file_access) {
+            if (success && ttl_lock.shared_idle()) {
+              // The guarded publication is not accepted until metadata exists.
+              success = renew_shared_idle_path(dst_file, ttl_seconds, true);
+            }
+            if (success && m_track_file_access && !ttl_lock.shared_idle()) {
               refresh_file_access(dst_file);
             }
             auto write_duration_us =

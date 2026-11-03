@@ -37,11 +37,28 @@ Configure the existing OffloadingConnector with:
 }
 ```
 
-Idle mode uses `.llmd-ttl-v2-idle-3600`; explicit fixed mode uses
-`.llmd-ttl-v1-3600`. Policy and duration select separate namespaces. Existing v1
-files retain fixed semantics and are not reinterpreted as idle files. Switching
-policy starts a separate cache population. Idle deadlines use atime + TTL;
-fixed deadlines use the publication mtime + TTL. Access tracking preserves mtime.
+Idle mode uses one `.llmd-ttl-v3-idle` namespace per cache root, independent of
+requested duration. The same model/rank/key therefore maps to one file for all
+idle lifetimes. Each inode stores `user.llmd.ttl_deadline_ns`, an absolute
+nanosecond deadline. Under the stable bucket lock, an accepted hit or existing
+store extends it to `max(existing_deadline, now + requested_TTL)` and refreshes
+atime. Shorter requests cannot shorten an existing deadline; bytes, inode and
+publication mtime are preserved on reuse.
+
+Explicit fixed mode still uses `.llmd-ttl-v1-3600`, with immutable publication
+mtime + TTL. Older `.llmd-ttl-v2-idle-N` files retain their old semantics; this
+revision neither migrates nor reinterprets them. Switching to v3 starts a new
+shared cache population. Version separation protects incompatible formats;
+there is no longer a namespace per idle duration.
+
+V3 requires writable inode extended attributes; startup probes support and
+fails if unavailable. Publication and deadline initialization finish under the
+same bucket lock before a supported reader can accept the generation. A crash
+between rename and metadata initialization can leave an invalid generation:
+missing/malformed deadline metadata is not accepted as a hit or taken as proof
+of TTL expiry. A successful new publication can replace it. Pressure eviction
+continues to follow its independent idle-age rule. Cache metadata is not a
+power-loss durability guarantee or a hard space reservation.
 
 A request may confirm the namespace policy through vLLM's existing transport:
 
@@ -49,8 +66,7 @@ A request may confirm the namespace policy through vLLM's existing transport:
 {"kv_transfer_params": {"llmd_storage_ttl_seconds": 3600}}
 ```
 
-This first version does not merge arbitrary per-request lifetimes for a shared
-prefix. A conflicting or invalid hint makes that request decline storage reuse
+Without an allowlist, a conflicting or invalid hint makes that request decline storage reuse
 and persistence, with a warning; it does not throw inside the inference
 scheduler. GPU cache reuse and inference continue according to vLLM's normal
 behavior. Frontend HTTP validation is outside this backend feature. With no
@@ -108,23 +124,20 @@ The default must belong to the allowlist. This option supports one worker rank,
 native POSIX CPU staging, and disabled storage events. Policy-blind events cannot
 advertise a lifetime-specific namespace safely, so enabling them is rejected.
 
-`spec.py` copies trusted `FileMapper` instances into separate `.llmd-ttl-v1-N`
-namespaces. `RequestStorageTTLManager` binds one route generation to the
-scheduler-owned `ReqContext`; it delegates to the selected fixed-TTL manager.
-Internal `SharedStorageLoadStoreSpec.source_paths` aliases carry store targets
-or accepted read FDs through the existing worker transfer path. Clients cannot
-supply these paths. Neither a late callback nor a changed request-parameter dict
-can select another request's namespace. The route survives request finish until
-all accepted load and store completions drain. A stale context cannot complete
-work for a later request that reuses its ID.
+`RequestStorageTTLManager` binds one immutable lifetime route to the scheduler's
+`ReqContext`. Idle routes use identical mapper paths for all supported durations;
+explicit fixed routes retain per-duration v1 paths. Internal
+`SharedStorageLoadStoreSpec.source_paths` aliases carry accepted read FDs or
+trusted store targets, and `ttl_seconds` carries the selected idle store lifetime.
+Clients never supply paths. Routes survive until accepted jobs drain, preventing
+late callbacks or reused request IDs from changing another job's lifetime.
 
-Identical prefixes under two lifetimes have separate physical copies. A shorter
-owner cannot shorten a longer copy; reading or an unexpired duplicate store does
-not renew its publication deadline. This is isolation with duplication, not a
-shared-file maximum-deadline ownership algorithm.
+Identical prefixes with different idle lifetimes share one physical copy. The
+native maximum-deadline update prevents shortening previous retention. Fixed
+publication policies retain isolated validity and do not renew their deadlines.
 
-The PVC evictor still discovers files, reads the lifetime from each namespace,
-rechecks generation metadata under the stable lock, and unlinks eligible files.
+The PVC evictor discovers files and reads the persisted v3 deadline or legacy
+namespace policy, rechecks under the stable lock, and unlinks eligible files.
 Set `ENABLE_STORAGE_TTL=true` and include the **common root** `/cache` in its
 `CACHE_DIRECTORY` so it can see every allowed namespace. This port adds no private
 quota, LRU policy or inline expiry deleter. Physical capacity feedback and cleanup
@@ -139,26 +152,31 @@ This branch adds TTL only on top of the recency/backpressure foundation in
 PR #741. It contains no deletion work-rate or file-attempt ceilings, adaptive
 capacity controller, or benchmark-only C++ batching helper. TTL remains opt-in.
 
-## Renewable idle retention and delayed retries
+## Shared idle retention and delayed retries
 
-The default `storage_ttl_policy: "idle"` uses `.llmd-ttl-v2-idle-N` namespaces
-when `storage_ttl_seconds` is configured. Select `"fixed"` explicitly for the
-non-renewing v1 publication deadline. Both also support the optional allowlist.
+The default `storage_ttl_policy: "idle"` uses `.llmd-ttl-v3-idle` when a duration
+is configured. The optional allowlist selects request lifetimes, not cache
+identity: its managers use the same mapper/path. The immutable internal store
+spec carries the selected lifetime to the native job; no process-global policy
+is changed between requests. A successful store initializes or extends the
+inode deadline. Accepted lookup uses the same native stripe/POSIX guard to
+open, pin and extend the deadline. Rebuild the native extension with the Python
+changes before using this format.
+
 An idle hit may reuse matching bytes still on disk after the former deadline.
-Accepting the hit opens/pins the inode and refreshes atime under the same native
-stripe mutex and POSIX record lock used by stores. KV bytes, inode and publication
-mtime stay unchanged. A busy bucket returns pending to the scheduler; per-key native probes back off
-for 10 ms between attempts rather than repeating filesystem operations on every
-scheduler poll. It does not wait on the lock. Ordinary filesystem metadata operations can still incur I/O.
+KV bytes, inode and publication mtime stay unchanged. A busy bucket returns
+pending with a 10 ms per-key metadata-probe backoff; ordinary filesystem
+operations can still incur I/O.
 
-The evictor discovers expiry using atime + N in v2-idle namespaces and mtime + N
-in v1 namespaces. Before unlinking it locks and rechecks the current file.
-A renewed or replaced file therefore invalidates a stale deletion candidate.
-Already accepted loads keep their descriptor until completion.
+The crawler reads the persisted deadline; the deleter locks and rechecks the
+current inode and deadline before unlinking. Renewed or replaced files therefore
+invalidate stale expiry candidates. Already accepted loads retain their file
+descriptors until completion. Below the pressure threshold, a future shared
+deadline keeps a file eligible for reuse; pressure eviction can still reclaim
+sufficiently idle files earlier.
 
-Each TTL-enabled deleter retains up to 4,096 distinct busy paths in a monotonic
-250 ms delayed retry queue and continues unrelated work. Due paths are rechecked
-without another crawl. Overflow falls back to discovery; the queue does not
-promise an unbounded backlog or hard cleanup deadline. Shutdown does not wait
-for busy locks. TTL cleanup still runs below the pressure threshold. This queue
-adds no CPU quota, global capacity controller or deletion-rate option.
+Each TTL-enabled deleter retains up to 4,096 distinct busy paths with 250 ms
+monotonic retries and continues unrelated work. Due paths are rechecked without
+another crawl. Overflow falls back to discovery; there is no unbounded backlog,
+hard cleanup deadline, CPU quota or global capacity controller. Shutdown does
+not wait for busy locks.

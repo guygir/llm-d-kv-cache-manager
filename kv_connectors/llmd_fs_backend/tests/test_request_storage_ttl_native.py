@@ -46,7 +46,10 @@ def test_actual_backend_mixed_namespace_bytes_late_read_and_duplicate_store(tmp_
 
     worker = mapper(root / "worker-default")
     m = RequestStorageTTLManager(
-        worker, {s: mapper(p) for s, p in roots.items()}, {}, 30
+        worker,
+        {s: mapper(p) for s, p in roots.items()},
+        {"storage_ttl_policy": "fixed"},
+        30,
     )
     x = torch.arange(512, dtype=torch.int32, device="cuda").view(8, 64).to(torch.int8)
     x[4].fill_(42)

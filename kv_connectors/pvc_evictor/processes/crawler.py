@@ -350,7 +350,7 @@ def crawler_process(
                             from llmd_fs_backend.storage_ttl import policy_for_path
 
                             policy = policy_for_path(file_path)
-                            expired = ttl_expired(file_stat, policy, int(current_time * 1_000_000_000))
+                            expired = ttl_expired(file_stat, policy, int(current_time * 1_000_000_000), path=file_path)
                         if not deletion_event.is_set() and not expired:
                             continue
                     if time_since_access < access_time_threshold_seconds and not expired:

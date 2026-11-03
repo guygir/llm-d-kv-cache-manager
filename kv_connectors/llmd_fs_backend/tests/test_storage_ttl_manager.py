@@ -66,7 +66,7 @@ def test_reset_refuses_inflight_descriptors_then_releases(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "policy, prefix", [(None, "v2-idle"), ("fixed", "v1"), ("idle", "v2-idle")]
+    "policy, prefix", [(None, "v3-idle"), ("fixed", "v1-60"), ("idle", "v3-idle")]
 )
 def test_ttl_configuration_creates_separate_namespace(tmp_path, policy, prefix):
     from test_spec import make_spec
@@ -80,7 +80,7 @@ def test_ttl_configuration_creates_separate_namespace(tmp_path, policy, prefix):
         },
     )
     assert normal.file_mapper.base_path != fixed.file_mapper.base_path
-    assert f"/.llmd-ttl-{prefix}-60/" in fixed.file_mapper.base_path
+    assert f"/.llmd-ttl-{prefix}/" in fixed.file_mapper.base_path
     assert fixed.get_manager()._ttl_pins.idle == (policy != "fixed")
     fixed.get_manager().shutdown()
 

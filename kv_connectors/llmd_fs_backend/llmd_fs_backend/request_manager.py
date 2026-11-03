@@ -3,7 +3,8 @@
 """Optional per-request TTL routing; capacity control stays with the PVC evictor.
 
 No private quota, LRU, prediction, or shared-file max-deadline policy is added.
-Each allowed lifetime owns independent copies. Internal path aliases use only
+Idle lifetime managers share one file mapper/namespace; fixed policies retain
+independent validity namespaces. Internal path aliases use only
 trusted server mappers; a request route remains until all accepted jobs drain.
 """
 
@@ -15,7 +16,7 @@ from vllm.v1.kv_offload.base import OffloadingManager, RequestOffloadingContext
 from llmd_fs_backend.manager import SharedStorageOffloadingManager
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
 from llmd_fs_backend.request_routing import MISSING, RequestPolicyRoutes
-from llmd_fs_backend.storage_ttl import policy_prefix
+from llmd_fs_backend.storage_ttl import IDLE_PREFIX, SHARED_IDLE_NAME, policy_prefix
 
 _ROUTE = "_llmd_storage_ttl_route"
 
@@ -26,7 +27,16 @@ class RequestStorageTTLManager(OffloadingManager):
         self.routes = RequestPolicyRoutes(
             policy_mappers,
             default,
-            prefix=policy_prefix(extra_config.get("storage_ttl_policy", "idle")),
+            shared_namespace=policy_prefix(
+                extra_config.get("storage_ttl_policy", "idle")
+            )
+            == IDLE_PREFIX,
+            prefix=(
+                SHARED_IDLE_NAME
+                if policy_prefix(extra_config.get("storage_ttl_policy", "idle"))
+                == IDLE_PREFIX
+                else policy_prefix("fixed")
+            ),
         )
         self._tokens = {}
         self._jobs = defaultdict(lambda: defaultdict(lambda: defaultdict(deque)))

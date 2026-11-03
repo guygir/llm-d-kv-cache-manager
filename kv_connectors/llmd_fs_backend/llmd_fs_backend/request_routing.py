@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Package-local request-route lifecycle kernel for optional TTL namespaces.
 
-Opaque generation tokens must travel with accepted jobs. Disjoint TTL namespaces
-avoid cross-policy renewal. This owns no files, quota, native I/O or deployment.
+Opaque generation tokens travel with accepted jobs. Fixed policies use disjoint
+namespaces; idle policies share files and aggregate deadlines in the native
+protocol. This kernel owns no files, quota or native I/O.
 """
 
 from dataclasses import dataclass, field
@@ -19,10 +20,13 @@ class Route:
     generation: int
     seconds: int | None  # None means decline storage, not infinite lifetime.
     prefix: str = ".llmd-ttl-v1-"
+    shared_namespace: bool = False
 
     @property
     def namespace(self):
-        return None if self.seconds is None else f"{self.prefix}{self.seconds}"
+        if self.seconds is None:
+            return None
+        return self.prefix if self.shared_namespace else f"{self.prefix}{self.seconds}"
 
 
 @dataclass
@@ -33,7 +37,9 @@ class _State:
 
 
 class RequestPolicyRoutes:
-    def __init__(self, allowed, default, *, prefix=".llmd-ttl-v1-"):
+    def __init__(
+        self, allowed, default, *, prefix=".llmd-ttl-v1-", shared_namespace=False
+    ):
         allowed = tuple(allowed)
         if not allowed or any(
             type(x) is not int or not 0 < x <= 2147483647 for x in allowed
@@ -43,6 +49,7 @@ class RequestPolicyRoutes:
             raise ValueError("Default must belong to allowlist")
         self.allowed, self.default = frozenset(allowed), default
         self.prefix = prefix
+        self.shared_namespace = shared_namespace
         self._states = {}
         self._sequence = count(1)
         self._mutex = RLock()
@@ -56,7 +63,13 @@ class RequestPolicyRoutes:
             seconds = self.default if hint is MISSING else hint
             if type(seconds) is not int or seconds not in self.allowed:
                 seconds = None  # Invalid client hints decline storage, not serving.
-            route = Route(request_id, next(self._sequence), seconds, self.prefix)
+            route = Route(
+                request_id,
+                next(self._sequence),
+                seconds,
+                self.prefix,
+                self.shared_namespace,
+            )
             self._states[request_id] = _State(route)
             return route
 

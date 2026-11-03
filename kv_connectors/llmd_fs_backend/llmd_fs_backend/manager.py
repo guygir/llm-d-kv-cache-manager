@@ -59,6 +59,7 @@ class SharedStorageOffloadingManager(OffloadingManager):
         self._ttl_pins = (
             InodePins(
                 self.storage_ttl_seconds,
+                shared=(extra_config or {}).get("storage_ttl_policy", "idle") == "idle",
                 idle=policy_prefix(
                     (extra_config or {}).get("storage_ttl_policy", "idle")
                 )
@@ -197,7 +198,14 @@ class SharedStorageOffloadingManager(OffloadingManager):
         keys_to_store = list(keys)
 
         # Set up store spec
-        store_spec = SharedStorageLoadStoreSpec(keys_to_store)
+        store_spec = SharedStorageLoadStoreSpec(
+            keys_to_store,
+            ttl_seconds=(
+                self.storage_ttl_seconds
+                if self._ttl_pins and self._ttl_pins.shared
+                else None
+            ),
+        )
 
         return PrepareStoreOutput(
             keys_to_store=keys_to_store,

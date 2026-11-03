@@ -162,3 +162,68 @@ def test_production_deleter_retries_busy_bucket_and_shuts_down(tmp_path, ttl_pro
             holder.wait()
     assert not thread.is_alive()
     assert busy.exists() != release
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared idle TTL uses Linux inode xattrs")
+def test_shared_deadline_rechecked_and_unknown_metadata_kept(tmp_path, ttl_protocol):
+    p = tmp_path / ttl_protocol.SHARED_IDLE_NAME / "model_r0/abc/00_g0/abc000.bin"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"KV")
+    pending = _deleter.PendingDeletes(delay=0)
+    os.setxattr(p, ttl_protocol.DEADLINE_XATTR, b"1")
+    pending.add(str(p))
+    os.setxattr(p, ttl_protocol.DEADLINE_XATTR, str(time.time_ns() + 60_000_000_000).encode())
+    assert _deleter.delete_batch(pending.take_due(1), False, logging.getLogger("test"), pressure_enabled=False) == (0, 0, [])
+    os.removexattr(p, ttl_protocol.DEADLINE_XATTR)
+    assert _deleter.delete_batch([str(p)], False, logging.getLogger("test"), pressure_enabled=False) == (0, 0, [])
+    assert p.read_bytes() == b"KV"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared idle TTL uses Linux inode xattrs")
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_shared_deadline_expiry_respects_dry_run(tmp_path, ttl_protocol, dry_run):
+    p = tmp_path / ttl_protocol.SHARED_IDLE_NAME / "model_r0/abc/00_g0/abc000.bin"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"KV")
+    os.setxattr(p, ttl_protocol.DEADLINE_XATTR, b"1")
+    result = _deleter.delete_batch([str(p)], dry_run, logging.getLogger("test"), pressure_enabled=False)
+    assert result[0] == 1 and p.exists() == dry_run
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared idle TTL uses Linux inode xattrs")
+def test_shared_actual_crawler_and_deleter_expire_without_pressure(tmp_path, ttl_protocol):
+    import queue
+    import threading
+    from processes.crawler import crawler_process
+
+    root = tmp_path / ttl_protocol.SHARED_IDLE_NAME / "model_r0/abc/00_g0"
+    root.mkdir(parents=True)
+    due = []
+    deadline = time.time_ns() + 1_000_000_000
+    for i in range(8):
+        p = root / f"abc{i:03x}.bin"
+        p.write_bytes(b"KV")
+        os.setxattr(p, ttl_protocol.DEADLINE_XATTR, str(deadline).encode())
+        due.append(p)
+    fresh = root / "abcfff.bin"
+    fresh.write_bytes(b"fresh")
+    os.setxattr(fresh, ttl_protocol.DEADLINE_XATTR, str(deadline + 60_000_000_000).encode())
+    before = fresh.stat()
+    pressure, shutdown = threading.Event(), threading.Event()
+    files, results = queue.Queue(), queue.Queue()
+    conf = dict(file_queue_min_size=64, file_queue_maxsize=128, file_access_time_threshold_minutes=60, enable_storage_ttl=True, dry_run=False, deletion_batch_size=1)
+    workers = [threading.Thread(target=crawler_process, args=(0, (0, 15), tmp_path, conf, pressure, files, results, shutdown)), threading.Thread(target=_deleter.deleter_process, args=(2, tmp_path, conf, pressure, files, results, shutdown))]
+    try:
+        for thread in workers:
+            thread.start()
+        end = time.monotonic() + 8
+        while any(p.exists() for p in due) and time.monotonic() < end:
+            time.sleep(0.02)
+        assert not any(p.exists() for p in due)
+        assert not pressure.is_set()
+        assert fresh.exists() and (fresh.stat().st_ino, fresh.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    finally:
+        shutdown.set()
+        for thread in workers:
+            thread.join(timeout=2)
+    assert all(not thread.is_alive() for thread in workers)

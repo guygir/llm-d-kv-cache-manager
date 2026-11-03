@@ -10,12 +10,12 @@ from llmd_fs_backend.request_manager import RequestStorageTTLManager
 pytestmark = pytest.mark.no_cuda_required
 
 
-@pytest.mark.parametrize("policy, prefix", [("fixed", "v1"), ("idle", "v2-idle")])
+@pytest.mark.parametrize("policy, prefix", [("fixed", "v1"), ("idle", "v3-idle")])
 def test_allowlist_is_opt_in_with_explicit_retention_policy(tmp_path, policy, prefix):
     old = make_spec(tmp_path / "fixed", {"storage_ttl_seconds": 30})
     assert type(old.get_manager()) is SharedStorageOffloadingManager
     assert old.get_manager()._ttl_pins.idle
-    assert "/.llmd-ttl-v2-idle-30/" in old.file_mapper.base_path
+    assert "/.llmd-ttl-v3-idle/" in old.file_mapper.base_path
     new = make_spec(
         tmp_path / "mixed",
         {
@@ -29,10 +29,19 @@ def test_allowlist_is_opt_in_with_explicit_retention_policy(tmp_path, policy, pr
     key = b"prefix" + (0).to_bytes(4, "big")
     c = ReqContext("r", {"llmd_storage_ttl_seconds": 1})
     m.on_new_request(c)
-    assert m._tokens["r"].namespace == f".llmd-ttl-{prefix}-1"
+    assert m._tokens["r"].namespace == (
+        ".llmd-ttl-v3-idle" if policy == "idle" else ".llmd-ttl-v1-1"
+    )
     out = m.prepare_store([key], c)
     source, target = next(iter(out.store_spec.source_paths.items()))
-    assert f"/.llmd-ttl-{prefix}-30/" in source and f"/.llmd-ttl-{prefix}-1/" in target
+    if policy == "idle":
+        assert source == target
+        assert "/.llmd-ttl-v3-idle/" in source
+        assert out.store_spec.ttl_seconds == 1
+    else:
+        assert (
+            f"/.llmd-ttl-{prefix}-30/" in source and f"/.llmd-ttl-{prefix}-1/" in target
+        )
     assert source == new.file_mapper.get_file_name(key)
     m.complete_store([key], c, success=False)
     m.on_request_finished(c)

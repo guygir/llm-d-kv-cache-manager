@@ -9,14 +9,18 @@ accepted load. Writers and deleters serialize pathname changes with stable
 bucket POSIX record locks. Locks are never removed by directory cleanup.
 """
 
+import errno
 import fcntl
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 PREFIX = ".llmd-ttl-v1-"
 IDLE_PREFIX = ".llmd-ttl-v2-idle-"
+SHARED_IDLE_NAME = ".llmd-ttl-v3-idle"
+DEADLINE_XATTR = "user.llmd.ttl_deadline_ns"
 NANOSECONDS = 1_000_000_000
 
 
@@ -36,17 +40,56 @@ def policy_prefix(value="idle"):
     return IDLE_PREFIX if value == "idle" else PREFIX
 
 
-def expired(stat, policy, now_ns=None):
+def policy_namespace(seconds, policy="idle"):
+    prefix = policy_prefix(policy)
+    return SHARED_IDLE_NAME if prefix == IDLE_PREFIX else prefix + str(seconds)
+
+
+def validate_shared_idle_root(root):
+    """Fail startup if this filesystem cannot persist the inode deadline."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryFile(dir=root) as f:
+            os.setxattr(f.fileno(), DEADLINE_XATTR, b"1")
+            if os.getxattr(f.fileno(), DEADLINE_XATTR) != b"1":
+                raise OSError("Deadline xattr readback mismatch")
+    except OSError as error:
+        raise ValueError("Idle storage TTL requires writable inode xattrs") from error
+
+
+def shared_idle_deadline(path_or_fd):
+    try:
+        if isinstance(path_or_fd, int):
+            value = os.getxattr(path_or_fd, DEADLINE_XATTR)
+        else:
+            value = os.getxattr(path_or_fd, DEADLINE_XATTR, follow_symlinks=False)
+    except OSError as error:
+        if error.errno in (errno.ENODATA, errno.ENOENT, errno.ERANGE):
+            return None
+        raise
+    if not value or not value.isdigit() or len(value) > 19:
+        return None
+    deadline = int(value)
+    return deadline if 0 < deadline <= 2**63 - 1 else None
+
+
+def expired(stat, policy, now_ns=None, *, path=None):
+    now_ns = time.time_ns() if now_ns is None else now_ns
+    if policy[0].name == SHARED_IDLE_NAME:
+        deadline = shared_idle_deadline(path) if path is not None else None
+        return deadline is not None and now_ns >= deadline
     origin = (
         stat.st_atime_ns if policy[0].name.startswith(IDLE_PREFIX) else stat.st_mtime_ns
     )
-    now_ns = time.time_ns() if now_ns is None else now_ns
     return now_ns >= origin + policy[1] * NANOSECONDS
 
 
 def policy_for_path(path):
     path = Path(path)
     for parent in path.parents:
+        if parent.name == SHARED_IDLE_NAME:
+            return parent, 0  # Duration is not part of shared-file identity.
         prefix = next(
             (p for p in (PREFIX, IDLE_PREFIX) if parent.name.startswith(p)), None
         )
@@ -80,6 +123,7 @@ def try_delete(path, *, pressure, idle_seconds, dry_run=False, defer_busy=False)
     if policy is None:
         return None
     descriptor = os.open(lock_path(path), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    file_fd = None
     try:
         try:
             fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -88,11 +132,15 @@ def try_delete(path, *, pressure, idle_seconds, dry_run=False, defer_busy=False)
                 raise
             return None
         try:
-            stat = os.stat(path, follow_symlinks=False)
+            if policy[0].name == SHARED_IDLE_NAME:
+                file_fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+                stat = os.fstat(file_fd)
+            else:
+                stat = os.stat(path, follow_symlinks=False)
         except FileNotFoundError:
             return None
         now = time.time_ns()
-        if not expired(stat, policy, now) and not (
+        if not expired(stat, policy, now, path=file_fd) and not (
             pressure and now - stat.st_atime_ns >= idle_seconds * NANOSECONDS
         ):
             return None
@@ -100,15 +148,18 @@ def try_delete(path, *, pressure, idle_seconds, dry_run=False, defer_busy=False)
             os.unlink(path)
         return stat
     finally:
+        if file_fd is not None:
+            os.close(file_fd)
         os.close(descriptor)
 
 
 class InodePins:
     """Request lifetime pins, including speculative lookups and late completions."""
 
-    def __init__(self, seconds, *, idle=False, idle_opener=None):
+    def __init__(self, seconds, *, idle=False, shared=False, idle_opener=None):
         self.seconds = validate_seconds(seconds)
         self.idle = idle
+        self.shared = shared
         self.idle_opener = idle_opener
         self.requests = {}
         self.counters = dict(opened=0, expired=0, misses=0, busy=0)
@@ -130,7 +181,11 @@ class InodePins:
                     from storage_offload import try_open_idle_hit
 
                     self.idle_opener = try_open_idle_hit
-                fd = self.idle_opener(str(path))
+                fd = (
+                    self.idle_opener(str(path), self.seconds)
+                    if self.shared
+                    else self.idle_opener(str(path))
+                )
                 if fd == -2:
                     self.counters["busy"] += 1
                     state["busy_until"][key] = time.monotonic() + 0.01

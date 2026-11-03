@@ -122,7 +122,8 @@ class StorageOffloadEngine {
                               std::vector<int> group_indices,
                               std::vector<std::string> dst_files,
                               std::vector<std::vector<int64_t>> all_block_ids,
-                              std::vector<int> head_offsets);
+                              std::vector<int> head_offsets,
+                              int64_t ttl_seconds = 0);
   // Async Storage -> GPU transfer (GET).
   // head_offsets[i] = slot offset in src_files[i] (in GPU blocks).
   bool async_load_gpu_blocks(int job_id,
