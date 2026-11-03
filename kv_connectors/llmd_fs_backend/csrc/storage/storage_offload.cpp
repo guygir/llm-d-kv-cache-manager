@@ -336,8 +336,7 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
 
           try {
             StorageTTLLock ttl_lock(dst_file);
-            // Fixed TTL requires a live generation; idle TTL renews present
-            // data.
+            // Idle stores renew; fixed stores require a live generation.
             if (std::ifstream(dst_file).good() &&
                 (ttl_lock.idle() || !ttl_lock.expired(dst_file))) {
               if (m_track_file_access) {

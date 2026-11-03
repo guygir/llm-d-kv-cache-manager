@@ -140,8 +140,9 @@ v1 namespace keep their meaning; the option defaults to `"fixed"` for compatibil
 An idle hit may reuse matching bytes still on disk after the former deadline.
 Accepting the hit opens/pins the inode and refreshes atime under the same native
 stripe mutex and POSIX record lock used by stores. KV bytes, inode and publication
-mtime stay unchanged. A busy bucket returns pending to the scheduler; it does not
-wait on the lock. Ordinary filesystem metadata operations can still incur I/O.
+mtime stay unchanged. A busy bucket returns pending to the scheduler; per-key native probes back off
+for 10 ms between attempts rather than repeating filesystem operations on every
+scheduler poll. It does not wait on the lock. Ordinary filesystem metadata operations can still incur I/O.
 
 The evictor discovers expiry using atime + N in v2-idle namespaces and mtime + N
 in v1 namespaces. Before unlinking it locks and rechecks the current file.

@@ -76,7 +76,11 @@ def test_busy_idle_lookup_is_pending_then_renews(idle_file):
         assert pins.lookup("r", b"key", str(idle_file)) is None
         assert not pins.requests["r"]["fds"]
         child.communicate("release\n", timeout=5)
-        assert pins.lookup("r", b"key", str(idle_file)) is True
+        deadline = time.monotonic() + 1
+        while pins.lookup("r", b"key", str(idle_file)) is None:
+            assert time.monotonic() < deadline
+            time.sleep(0.002)
+        assert pins.requests["r"]["current"]
     finally:
         pins.close()
         if child.poll() is None:
@@ -110,3 +114,20 @@ def test_idle_store_reuses_expired_present_generation(tmp_path):
     assert engine.async_load_gpu_blocks(3, [0], [str(path)], [[3]], [0])
     wait_finished(engine, 3)
     assert torch.equal(tensors[0][3], expected)
+
+
+@pytest.mark.no_cuda_required
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux descriptor protocol")
+def test_busy_scheduler_polls_do_not_repeat_filesystem_probes(monkeypatch):
+    calls = []
+    clock = [1.0]
+    monkeypatch.setattr(ttl.time, "monotonic", lambda: clock[0])
+    pins = ttl.InodePins(2, idle=True, idle_opener=lambda p: calls.append(p) or -2)
+    for _ in range(1000):
+        assert pins.lookup("r", b"key", "path") is None
+    assert calls == ["path"]
+    clock[0] += 0.02
+    assert pins.lookup("r", b"key", "path") is None
+    assert calls == ["path", "path"]
+    pins.finish("r")
+    assert not pins.requests

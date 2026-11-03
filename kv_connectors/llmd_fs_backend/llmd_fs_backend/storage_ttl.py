@@ -111,11 +111,11 @@ class InodePins:
         self.idle = idle
         self.idle_opener = idle_opener
         self.requests = {}
-        self.counters = dict(opened=0, expired=0, misses=0)
+        self.counters = dict(opened=0, expired=0, misses=0, busy=0)
 
     def lookup(self, request_id, key, path):
         state = self.requests.setdefault(
-            request_id, dict(current={}, fds=[], loads=0, finished=False)
+            request_id, dict(current={}, fds=[], loads=0, finished=False, busy_until={})
         )
         old = state["current"].get(key)
         now = time.time_ns()
@@ -123,13 +123,19 @@ class InodePins:
             return True
         try:
             if self.idle:
+                retry_at = state["busy_until"].get(key)
+                if retry_at is not None and time.monotonic() < retry_at:
+                    return None
                 if self.idle_opener is None:
                     from storage_offload import try_open_idle_hit
 
                     self.idle_opener = try_open_idle_hit
                 fd = self.idle_opener(str(path))
                 if fd == -2:
-                    return None  # Pending: scheduler retries without blocking.
+                    self.counters["busy"] += 1
+                    state["busy_until"][key] = time.monotonic() + 0.01
+                    return None  # Pending; avoid filesystem probes on every poll.
+                state["busy_until"].pop(key, None)
                 if fd == -1:
                     self.counters["misses"] += 1
                     return False
