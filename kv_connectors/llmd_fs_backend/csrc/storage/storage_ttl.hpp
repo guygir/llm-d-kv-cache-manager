@@ -15,18 +15,23 @@
 #include <unistd.h>
 
 // Versioned namespace policy, shared with storage_ttl.py. No deadline renewal
-// on reads or duplicate stores. Stable stripe locks serialize writers and
+// for v1; v2-idle renews retention. Stable stripe locks serialize writers and
 // deleters.
 class StorageTTLLock {
  public:
-  explicit StorageTTLLock(const std::string& path) {
-    constexpr const char* prefix = ".llmd-ttl-v1-";
-    if (path.find("/.llmd-ttl-v1-") == std::string::npos) return;
+  explicit StorageTTLLock(const std::string& path, bool nonblocking = false) {
+    if (path.find("/.llmd-ttl-") == std::string::npos) return;
     std::filesystem::path root;
     for (const auto& component : std::filesystem::path(path)) {
       root /= component;
       const auto name = component.string();
-      if (name.rfind(prefix, 0) != 0) continue;
+      const char* prefix = ".llmd-ttl-v1-";
+      if (name.rfind(".llmd-ttl-v2-idle-", 0) == 0) {
+        prefix = ".llmd-ttl-v2-idle-";
+        idle_ = true;
+      } else if (name.rfind(prefix, 0) != 0) {
+        continue;
+      }
       const auto suffix = name.substr(std::char_traits<char>::length(prefix));
       if (suffix.empty() ||
           suffix.find_first_not_of("0123456789") != std::string::npos)
@@ -44,7 +49,13 @@ class StorageTTLLock {
       // POSIX record locks are process-owned. A process-local mutex also
       // serializes threads and prevents one FD close releasing a sibling lock.
       local_lock_ = std::unique_lock<std::mutex>(
-          stripes()[std::stoul(bucket, nullptr, 16)]);
+          stripes()[std::stoul(bucket, nullptr, 16)],
+          std::defer_lock);
+      if (nonblocking) {
+        if (!local_lock_.try_lock()) return;
+      } else {
+        local_lock_.lock();
+      }
       fd_ = open(lock.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
       if (fd_ < 0)
         throw std::system_error(errno,
@@ -57,19 +68,23 @@ class StorageTTLLock {
       request.l_len = 0;
       int result;
       do {
-        result = fcntl(fd_, F_SETLKW, &request);
+        result = fcntl(fd_, nonblocking ? F_SETLK : F_SETLKW, &request);
       } while (result < 0 && errno == EINTR);
       if (result < 0) {
         const int error = errno;
         close(fd_);
         fd_ = -1;
+        if (nonblocking && (error == EACCES || error == EAGAIN)) return;
         throw std::system_error(error,
                                 std::generic_category(),
                                 "TTL publication lock");
       }
+      acquired_ = true;
       return;
     }
   }
+  bool acquired() const { return acquired_; }
+  bool idle() const { return idle_; }
   StorageTTLLock(const StorageTTLLock&) = delete;
   StorageTTLLock& operator=(const StorageTTLLock&) = delete;
   ~StorageTTLLock() {
@@ -96,4 +111,30 @@ class StorageTTLLock {
   std::unique_lock<std::mutex> local_lock_;
   int fd_ = -1;
   int64_t seconds_ = 0;
+  bool acquired_ = false;
+  bool idle_ = false;
 };
+
+// Return an accepted descriptor, -1 for missing, or -2 for a busy bucket.
+// Uses exactly the same local stripe and cross-process lock as native stores.
+inline int try_open_idle_hit(const std::string& path) {
+  StorageTTLLock guard(path, true);
+  if (!guard.idle()) throw std::invalid_argument("Idle TTL namespace required");
+  if (!guard.acquired()) return -2;
+  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    if (errno == ENOENT) return -1;
+    throw std::system_error(errno, std::generic_category(), "TTL hit open");
+  }
+  struct stat info;
+  struct timespec times[2] = {};
+  times[0].tv_nsec = UTIME_NOW;
+  times[1].tv_nsec = UTIME_OMIT;
+  if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+      futimens(fd, times) != 0) {
+    const int error = errno ? errno : EINVAL;
+    close(fd);
+    throw std::system_error(error, std::generic_category(), "TTL hit renewal");
+  }
+  return fd;
+}

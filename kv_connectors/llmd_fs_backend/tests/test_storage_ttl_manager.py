@@ -63,13 +63,18 @@ def test_reset_refuses_inflight_descriptors_then_releases(tmp_path):
     m.shutdown()
 
 
-def test_ttl_configuration_creates_separate_namespace(tmp_path):
+@pytest.mark.parametrize("policy, prefix", [("fixed", "v1"), ("idle", "v2-idle")])
+def test_ttl_configuration_creates_separate_namespace(tmp_path, policy, prefix):
     from test_spec import make_spec
 
     normal = make_spec(tmp_path, {})
-    fixed = make_spec(tmp_path, {"storage_ttl_seconds": 60})
+    fixed = make_spec(
+        tmp_path, {"storage_ttl_seconds": 60, "storage_ttl_policy": policy}
+    )
     assert normal.file_mapper.base_path != fixed.file_mapper.base_path
-    assert "/.llmd-ttl-v1-60/" in fixed.file_mapper.base_path
+    assert f"/.llmd-ttl-{prefix}-60/" in fixed.file_mapper.base_path
+    assert fixed.get_manager()._ttl_pins.idle == (policy == "idle")
+    fixed.get_manager().shutdown()
 
 
 @pytest.mark.parametrize("setting", [{"backend": "OBJ"}, {"gds_mode": "read_write"}])

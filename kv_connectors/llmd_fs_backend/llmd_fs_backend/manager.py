@@ -30,7 +30,12 @@ from zmq import ZMQError
 from llmd_fs_backend.event_publisher import StorageMedium
 from llmd_fs_backend.file_mapper import FileMapper
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
-from llmd_fs_backend.storage_ttl import InodePins, validate_seconds
+from llmd_fs_backend.storage_ttl import (
+    IDLE_PREFIX,
+    InodePins,
+    policy_prefix,
+    validate_seconds,
+)
 
 logger = init_logger(__name__)
 
@@ -52,7 +57,15 @@ class SharedStorageOffloadingManager(OffloadingManager):
             (extra_config or {}).get("storage_ttl_seconds")
         )
         self._ttl_pins = (
-            InodePins(self.storage_ttl_seconds) if self.storage_ttl_seconds else None
+            InodePins(
+                self.storage_ttl_seconds,
+                idle=policy_prefix(
+                    (extra_config or {}).get("storage_ttl_policy", "fixed")
+                )
+                == IDLE_PREFIX,
+            )
+            if self.storage_ttl_seconds
+            else None
         )
         self._event_publisher = (
             event_publisher

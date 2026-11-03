@@ -131,3 +131,26 @@ this storage policy. No automatic llm-d policy injector or TTL predictor is adde
 This branch adds TTL only on top of the recency/backpressure foundation in
 PR #741. It contains no deletion work-rate or file-attempt ceilings, adaptive
 capacity controller, or benchmark-only C++ batching helper. TTL remains opt-in.
+
+## Renewable idle retention (new local revision)
+
+Set `storage_ttl_policy: "idle"` alongside `storage_ttl_seconds` (and the optional
+allowlist) to use `.llmd-ttl-v2-idle-N` namespaces. The existing fixed policy and
+v1 namespace keep their meaning; the option defaults to `"fixed"` for compatibility.
+An idle hit may reuse matching bytes still on disk after the former deadline.
+Accepting the hit opens/pins the inode and refreshes atime under the same native
+stripe mutex and POSIX record lock used by stores. KV bytes, inode and publication
+mtime stay unchanged. A busy bucket returns pending to the scheduler; it does not
+wait on the lock. Ordinary filesystem metadata operations can still incur I/O.
+
+The evictor discovers expiry using atime + N in v2-idle namespaces and mtime + N
+in v1 namespaces. Before unlinking it locks and rechecks the current file.
+A renewed or replaced file therefore invalidates a stale deletion candidate.
+Already accepted loads keep their descriptor until completion.
+
+Each TTL-enabled deleter retains up to 4,096 distinct busy paths in a monotonic
+250 ms delayed retry queue and continues unrelated work. Due paths are rechecked
+without another crawl. Overflow falls back to discovery; the queue does not
+promise an unbounded backlog or hard cleanup deadline. Shutdown does not wait
+for busy locks. TTL cleanup still runs below the pressure threshold. This queue
+adds no CPU quota, global capacity controller or deletion-rate option.

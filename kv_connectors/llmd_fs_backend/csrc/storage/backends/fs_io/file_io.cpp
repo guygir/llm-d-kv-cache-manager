@@ -100,7 +100,7 @@ bool FileIO::write_buffer_to_file(const StagingBufferInfo& buf,
   // Fixed TTL starts at publication, not at request admission or buffer write.
   // Readers update atime only; namespace policy turns this immutable mtime into
   // a persisted deadline. The caller holds the pathname publication lock.
-  if (target_path.find("/.llmd-ttl-v1-") != std::string::npos) {
+  if (target_path.find("/.llmd-ttl-") != std::string::npos) {
     struct timespec stamp[2] = {};
     stamp[0].tv_nsec = UTIME_NOW;
     stamp[1].tv_nsec = UTIME_NOW;

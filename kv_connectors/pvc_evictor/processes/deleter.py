@@ -1,6 +1,7 @@
 """Deleter process for batch file deletion."""
 
 import contextlib
+import heapq
 import json
 import logging
 import multiprocessing
@@ -16,6 +17,37 @@ from utils.system import setup_logging
 
 # Constants for timing
 PARTIAL_BATCH_TIMEOUT_SECONDS = 5.0  # Process partial batch after N seconds of inactivity
+
+
+class PendingDeletes:
+    """Bounded, deduplicated delayed retries; candidates are always re-statted."""
+
+    def __init__(self, limit=4096, delay=0.25):
+        self.limit, self.delay = limit, delay
+        self.paths = set()
+        self.heap = []
+
+    def add(self, path):
+        if path in self.paths:
+            return True
+        if len(self.paths) >= self.limit:
+            return False  # Another crawl remains the bounded-overflow fallback.
+        self.paths.add(path)
+        heapq.heappush(self.heap, (time.monotonic() + self.delay, path))
+        return True
+
+    def take_due(self, limit):
+        result = []
+        now = time.monotonic()
+        while self.heap and self.heap[0][0] <= now and len(result) < limit:
+            _, path = heapq.heappop(self.heap)
+            self.paths.remove(path)
+            result.append(path)
+        return result
+
+    def wait_seconds(self):
+        return min(1.0, max(0.0, self.heap[0][0] - time.monotonic())) if self.heap else 1.0
+
 
 _model_name_cache: dict[str, str | None] = {}
 
@@ -83,6 +115,7 @@ def delete_batch(
     *,
     file_access_time_threshold_minutes: float = DEFAULT_FILE_ACCESS_TIME_THRESHOLD_MINUTES,
     pressure_enabled: bool = True,
+    pending_deletes=None,
 ) -> tuple[int, int, list[str]]:
     """
     Delete a batch of files using xargs rm -f (batch deletion).
@@ -106,7 +139,7 @@ def delete_batch(
     # still depends on the filesystem/connector reporting accurate atime.
     for path_str in file_paths:
         try:
-            if "/.llmd-ttl-v1-" in path_str:
+            if "/.llmd-ttl-" in path_str:
                 from llmd_fs_backend.storage_ttl import try_delete
 
                 removed = try_delete(
@@ -114,6 +147,7 @@ def delete_batch(
                     pressure=pressure_enabled,
                     idle_seconds=access_time_threshold_seconds,
                     dry_run=dry_run,
+                    defer_busy=pending_deletes is not None,
                 )
                 if removed is not None:
                     ttl_deleted_paths.append(path_str)
@@ -127,8 +161,11 @@ def delete_batch(
                 continue
             valid_paths.append(path_str)
             total_bytes += stat.st_size
+        except BlockingIOError:
+            if pending_deletes is not None and not pending_deletes.add(path_str):
+                logger.debug("TTL retry queue full; rediscover later: %s", path_str)
         except Exception:
-            if "/.llmd-ttl-v1-" in path_str:
+            if "/.llmd-ttl-" in path_str:
                 logger.warning("TTL candidate could not be checked safely: %s", path_str, exc_info=True)
             continue
 
@@ -199,6 +236,7 @@ def delete_file_batch(
     *,
     file_access_time_threshold_minutes: float = DEFAULT_FILE_ACCESS_TIME_THRESHOLD_MINUTES,
     pressure_enabled: bool = True,
+    pending_deletes=None,
 ) -> tuple[int, int, float]:
     """
     Process a batch of files for deletion and report progress to main process.
@@ -213,6 +251,7 @@ def delete_file_batch(
         folder_queue=folder_queue,
         file_access_time_threshold_minutes=file_access_time_threshold_minutes,
         **({"pressure_enabled": False} if not pressure_enabled else {}),
+        **({"pending_deletes": pending_deletes} if pending_deletes is not None else {}),
     )
 
     if deleted_paths and event_publisher is not None and cache_path is not None:
@@ -264,6 +303,7 @@ def deleter_process(
     batch_size = config_dict["deletion_batch_size"]
     dry_run = config_dict["dry_run"]
     enable_ttl = config_dict.get("enable_storage_ttl", False)
+    pending_deletes = PendingDeletes() if enable_ttl else None
     file_access_time_threshold_minutes = config_dict["file_access_time_threshold_minutes"]
 
     logger.info(f"Deleter P{process_num} started - batch size: {batch_size}, dry_run: {dry_run}")
@@ -302,9 +342,12 @@ def deleter_process(
             # Only process when deletion is ON
             if deletion_event.is_set() or enable_ttl:
                 try:
-                    # Try to get file from queue
+                    if pending_deletes is not None:
+                        current_batch.extend(pending_deletes.take_due(max(0, batch_size - len(current_batch))))
+                    # Keep consuming unrelated work while busy buckets wait.
                     try:
-                        file_path_str = file_queue.get(timeout=1.0)
+                        timeout = pending_deletes.wait_seconds() if pending_deletes is not None else 1.0
+                        file_path_str = file_queue.get(timeout=0 if len(current_batch) >= batch_size else timeout)
                         current_batch.append(file_path_str)
                         last_batch_check_time = time.time()
 
@@ -323,7 +366,11 @@ def deleter_process(
                                 event_publisher,
                                 cache_path,
                                 file_access_time_threshold_minutes=file_access_time_threshold_minutes,
-                                **({"pressure_enabled": deletion_event.is_set()} if enable_ttl else {}),
+                                **(
+                                    {"pressure_enabled": deletion_event.is_set(), "pending_deletes": pending_deletes}
+                                    if enable_ttl
+                                    else {}
+                                ),
                             )
                             current_batch = []
 
@@ -346,7 +393,9 @@ def deleter_process(
                         queue_empty = False
 
                     should_process_partial = current_batch and (
-                        (time_since_last_check >= partial_batch_timeout) or queue_empty
+                        (time_since_last_check >= partial_batch_timeout)
+                        or queue_empty
+                        or len(current_batch) >= batch_size
                     )
 
                     if should_process_partial:
@@ -363,7 +412,11 @@ def deleter_process(
                             event_publisher,
                             cache_path,
                             file_access_time_threshold_minutes=file_access_time_threshold_minutes,
-                            **({"pressure_enabled": deletion_event.is_set()} if enable_ttl else {}),
+                            **(
+                                {"pressure_enabled": deletion_event.is_set(), "pending_deletes": pending_deletes}
+                                if enable_ttl
+                                else {}
+                            ),
                         )
                         current_batch = []
                         last_batch_check_time = current_time
@@ -398,7 +451,11 @@ def deleter_process(
                 event_publisher,
                 cache_path,
                 file_access_time_threshold_minutes=file_access_time_threshold_minutes,
-                **({"pressure_enabled": deletion_event.is_set()} if enable_ttl else {}),
+                **(
+                    {"pressure_enabled": deletion_event.is_set(), "pending_deletes": pending_deletes}
+                    if enable_ttl
+                    else {}
+                ),
             )
 
     except Exception as e:

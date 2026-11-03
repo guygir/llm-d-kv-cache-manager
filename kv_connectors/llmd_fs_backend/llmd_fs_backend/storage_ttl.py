@@ -1,8 +1,8 @@
 # Copyright 2026 The llm-d Authors.
 # SPDX-License-Identifier: Apache-2.0
-"""Filesystem-only fixed lifetime protocol; no vLLM or Torch imports.
+"""Filesystem-only fixed and idle lifetime protocol; no vLLM or Torch imports.
 
-A policy-versioned namespace fixes TTL independently of reader atime updates.
+Versioned namespaces retain fixed-publication and renewable-idle semantics.
 Readers pin the inode with an open descriptor; a same-container native worker
 reads through /proc/<scheduler-pid>/fd/<fd>. Unlink/replace cannot break an
 accepted load. Writers and deleters serialize pathname changes with stable
@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 PREFIX = ".llmd-ttl-v1-"
+IDLE_PREFIX = ".llmd-ttl-v2-idle-"
 NANOSECONDS = 1_000_000_000
 
 
@@ -29,11 +30,28 @@ def validate_seconds(value):
     return value
 
 
+def policy_prefix(value="fixed"):
+    if value not in ("fixed", "idle"):
+        raise ValueError("storage_ttl_policy must be fixed or idle")
+    return IDLE_PREFIX if value == "idle" else PREFIX
+
+
+def expired(stat, policy, now_ns=None):
+    origin = (
+        stat.st_atime_ns if policy[0].name.startswith(IDLE_PREFIX) else stat.st_mtime_ns
+    )
+    now_ns = time.time_ns() if now_ns is None else now_ns
+    return now_ns >= origin + policy[1] * NANOSECONDS
+
+
 def policy_for_path(path):
     path = Path(path)
     for parent in path.parents:
-        if parent.name.startswith(PREFIX):
-            suffix = parent.name[len(PREFIX) :]
+        prefix = next(
+            (p for p in (PREFIX, IDLE_PREFIX) if parent.name.startswith(p)), None
+        )
+        if prefix is not None:
+            suffix = parent.name[len(prefix) :]
             if not suffix.isdecimal() or not 1 <= int(suffix) <= 2_147_483_647:
                 raise ValueError("Invalid reserved TTL namespace")
             return parent, int(suffix)
@@ -52,7 +70,7 @@ def lock_path(path):
     return folder / (bucket + ".lock")
 
 
-def try_delete(path, *, pressure, idle_seconds, dry_run=False):
+def try_delete(path, *, pressure, idle_seconds, dry_run=False, defer_busy=False):
     """Return deleted stat, or None if not eligible/busy/missing.
 
     Deadline is rechecked under the same exclusive lock as publication. An
@@ -66,14 +84,15 @@ def try_delete(path, *, pressure, idle_seconds, dry_run=False):
         try:
             fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            if defer_busy:
+                raise
             return None
         try:
             stat = os.stat(path, follow_symlinks=False)
         except FileNotFoundError:
             return None
         now = time.time_ns()
-        expired = now >= stat.st_mtime_ns + policy[1] * NANOSECONDS
-        if not expired and not (
+        if not expired(stat, policy, now) and not (
             pressure and now - stat.st_atime_ns >= idle_seconds * NANOSECONDS
         ):
             return None
@@ -87,8 +106,10 @@ def try_delete(path, *, pressure, idle_seconds, dry_run=False):
 class InodePins:
     """Request lifetime pins, including speculative lookups and late completions."""
 
-    def __init__(self, seconds):
+    def __init__(self, seconds, *, idle=False, idle_opener=None):
         self.seconds = validate_seconds(seconds)
+        self.idle = idle
+        self.idle_opener = idle_opener
         self.requests = {}
         self.counters = dict(opened=0, expired=0, misses=0)
 
@@ -98,16 +119,31 @@ class InodePins:
         )
         old = state["current"].get(key)
         now = time.time_ns()
-        if old is not None and now < old[1] + self.seconds * NANOSECONDS:
+        if old is not None and (self.idle or now < old[1] + self.seconds * NANOSECONDS):
             return True
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            if self.idle:
+                if self.idle_opener is None:
+                    from storage_offload import try_open_idle_hit
+
+                    self.idle_opener = try_open_idle_hit
+                fd = self.idle_opener(str(path))
+                if fd == -2:
+                    return None  # Pending: scheduler retries without blocking.
+                if fd == -1:
+                    self.counters["misses"] += 1
+                    return False
+            else:
+                fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         except FileNotFoundError:
             self.counters["misses"] += 1
             return False
         try:
             stat = os.fstat(fd)
-            if time.time_ns() >= stat.st_mtime_ns + self.seconds * NANOSECONDS:
+            if (
+                not self.idle
+                and time.time_ns() >= stat.st_mtime_ns + self.seconds * NANOSECONDS
+            ):
                 self.counters["expired"] += 1
                 os.close(fd)
                 return False

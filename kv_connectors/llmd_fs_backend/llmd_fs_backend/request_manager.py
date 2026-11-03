@@ -15,6 +15,7 @@ from vllm.v1.kv_offload.base import OffloadingManager, RequestOffloadingContext
 from llmd_fs_backend.manager import SharedStorageOffloadingManager
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
 from llmd_fs_backend.request_routing import MISSING, RequestPolicyRoutes
+from llmd_fs_backend.storage_ttl import policy_prefix
 
 _ROUTE = "_llmd_storage_ttl_route"
 
@@ -22,7 +23,11 @@ _ROUTE = "_llmd_storage_ttl_route"
 class RequestStorageTTLManager(OffloadingManager):
     def __init__(self, worker_mapper, policy_mappers, extra_config, default):
         self.worker_mapper = worker_mapper
-        self.routes = RequestPolicyRoutes(policy_mappers, default)
+        self.routes = RequestPolicyRoutes(
+            policy_mappers,
+            default,
+            prefix=policy_prefix(extra_config.get("storage_ttl_policy", "fixed")),
+        )
         self._tokens = {}
         self._jobs = defaultdict(lambda: defaultdict(lambda: defaultdict(deque)))
         self._sequence = count(1)

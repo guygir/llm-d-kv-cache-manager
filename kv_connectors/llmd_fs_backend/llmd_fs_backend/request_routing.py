@@ -18,10 +18,11 @@ class Route:
     request_id: str
     generation: int
     seconds: int | None  # None means decline storage, not infinite lifetime.
+    prefix: str = ".llmd-ttl-v1-"
 
     @property
     def namespace(self):
-        return None if self.seconds is None else f".llmd-ttl-v1-{self.seconds}"
+        return None if self.seconds is None else f"{self.prefix}{self.seconds}"
 
 
 @dataclass
@@ -32,7 +33,7 @@ class _State:
 
 
 class RequestPolicyRoutes:
-    def __init__(self, allowed, default):
+    def __init__(self, allowed, default, *, prefix=".llmd-ttl-v1-"):
         allowed = tuple(allowed)
         if not allowed or any(
             type(x) is not int or not 0 < x <= 2147483647 for x in allowed
@@ -41,6 +42,7 @@ class RequestPolicyRoutes:
         if type(default) is not int or default not in allowed:
             raise ValueError("Default must belong to allowlist")
         self.allowed, self.default = frozenset(allowed), default
+        self.prefix = prefix
         self._states = {}
         self._sequence = count(1)
         self._mutex = RLock()
@@ -54,7 +56,7 @@ class RequestPolicyRoutes:
             seconds = self.default if hint is MISSING else hint
             if type(seconds) is not int or seconds not in self.allowed:
                 seconds = None  # Invalid client hints decline storage, not serving.
-            route = Route(request_id, next(self._sequence), seconds)
+            route = Route(request_id, next(self._sequence), seconds, self.prefix)
             self._states[request_id] = _State(route)
             return route
 

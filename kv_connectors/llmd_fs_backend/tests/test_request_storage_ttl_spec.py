@@ -10,21 +10,27 @@ from llmd_fs_backend.request_manager import RequestStorageTTLManager
 pytestmark = pytest.mark.no_cuda_required
 
 
-def test_allowlist_is_opt_in_and_fixed_default_unchanged(tmp_path):
+@pytest.mark.parametrize("policy, prefix", [("fixed", "v1"), ("idle", "v2-idle")])
+def test_allowlist_is_opt_in_and_fixed_default_unchanged(tmp_path, policy, prefix):
     old = make_spec(tmp_path / "fixed", {"storage_ttl_seconds": 30})
     assert type(old.get_manager()) is SharedStorageOffloadingManager
     new = make_spec(
         tmp_path / "mixed",
-        {"storage_ttl_seconds": 30, "storage_ttl_allowlist": [1, 30]},
+        {
+            "storage_ttl_seconds": 30,
+            "storage_ttl_allowlist": [1, 30],
+            "storage_ttl_policy": policy,
+        },
     )
     m = new.get_manager()
     assert isinstance(m, RequestStorageTTLManager) and new.get_manager() is m
     key = b"prefix" + (0).to_bytes(4, "big")
     c = ReqContext("r", {"llmd_storage_ttl_seconds": 1})
     m.on_new_request(c)
+    assert m._tokens["r"].namespace == f".llmd-ttl-{prefix}-1"
     out = m.prepare_store([key], c)
     source, target = next(iter(out.store_spec.source_paths.items()))
-    assert "/.llmd-ttl-v1-30/" in source and "/.llmd-ttl-v1-1/" in target
+    assert f"/.llmd-ttl-{prefix}-30/" in source and f"/.llmd-ttl-{prefix}-1/" in target
     assert source == new.file_mapper.get_file_name(key)
     m.complete_store([key], c, success=False)
     m.on_request_finished(c)
