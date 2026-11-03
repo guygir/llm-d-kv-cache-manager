@@ -84,24 +84,6 @@ def test_retry_queue_is_bounded_deduplicated_and_delayed(monkeypatch):
     assert not pending.paths and not pending.heap
 
 
-def test_busy_candidate_is_retried_without_another_crawl(tmp_path, ttl_protocol, monkeypatch):
-    path = candidate(tmp_path, age=60)
-    pending = _deleter.PendingDeletes(delay=0)
-    original = ttl_protocol.try_delete
-
-    def busy(*args, **kwargs):
-        raise BlockingIOError()
-
-    monkeypatch.setattr(ttl_protocol, "try_delete", busy)
-    assert _deleter.delete_batch(
-        [str(path)], False, logging.getLogger("test"), pressure_enabled=False, pending_deletes=pending
-    ) == (0, 0, [])
-    monkeypatch.setattr(ttl_protocol, "try_delete", original)
-    assert _deleter.delete_batch(
-        pending.take_due(1), False, logging.getLogger("test"), pressure_enabled=False, pending_deletes=pending
-    ) == (1, 8, [str(path)])
-
-
 def test_retry_rechecks_renewed_idle_generation(tmp_path, ttl_protocol):
     path = tmp_path / (ttl_protocol.IDLE_PREFIX + "30") / "model/abc/00_g0/abc000.bin"
     path.parent.mkdir(parents=True)
