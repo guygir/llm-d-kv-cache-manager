@@ -343,7 +343,17 @@ def crawler_process(
                     file_atime = file_stat.st_atime  # Last access time
                     time_since_access = current_time - file_atime
 
-                    if time_since_access < access_time_threshold_seconds:
+                    expired = False
+                    if config_dict.get("enable_storage_ttl", False):
+                        if "/.llmd-ttl-" in str(file_path):
+                            from llmd_fs_backend.storage_ttl import expired as ttl_expired
+                            from llmd_fs_backend.storage_ttl import policy_for_path
+
+                            policy = policy_for_path(file_path)
+                            expired = ttl_expired(file_stat, policy, int(current_time * 1_000_000_000), path=file_path)
+                        if not deletion_event.is_set() and not expired:
+                            continue
+                    if time_since_access < access_time_threshold_seconds and not expired:
                         # File was accessed recently - skip it
                         files_skipped += 1
                         continue

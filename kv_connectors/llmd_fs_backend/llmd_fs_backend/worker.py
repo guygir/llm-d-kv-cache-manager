@@ -320,6 +320,8 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
             block_offset += group_size
             key_offset += num_files
 
+        if storage_spec.source_paths is not None:
+            all_files = [storage_spec.source_paths[path] for path in all_files]
         return all_group_indices, all_files, all_block_ids, all_head_offsets
 
 
@@ -357,8 +359,14 @@ class GPUToStorageHandler(BaseStorageOffloadingHandler):
             total_blocks,
             total_bytes / (1 << 20),
         )
+        ttl = getattr(dst_spec, "ttl_seconds", None)
         success = self.engine.async_store_gpu_blocks(
-            job_id, group_indices, dst_files, per_file_block_ids, head_offsets
+            job_id,
+            group_indices,
+            dst_files,
+            per_file_block_ids,
+            head_offsets,
+            **({"ttl_seconds": ttl} if ttl is not None else {}),
         )
         if success:
             self._record_job(job_id, total_bytes)
