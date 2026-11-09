@@ -49,9 +49,14 @@ class Config:
     log_file_path: str | None = None  # Optional file path to write logs to (default: None, stdout only)
     storage_events_endpoint: str = ""  # Storage events publisher endpoint
 
+    candidate_queue_policy: str = "fifo"
+    candidate_age_bands_seconds: tuple[float, ...] = (60, 300, 3600, 86400)
+
     def to_dict(self) -> dict:
         """Convert configuration to dictionary for multiprocessing."""
         return {
+            "candidate_queue_policy": self.candidate_queue_policy,
+            "candidate_age_bands_seconds": self.candidate_age_bands_seconds,
             "pvc_mount_path": self.pvc_mount_path,
             "cleanup_threshold": self.cleanup_threshold,
             "target_threshold": self.target_threshold,
@@ -72,7 +77,19 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
+        policy = os.getenv("CANDIDATE_QUEUE_POLICY", "fifo")
+        if policy not in ("fifo", "age_bands"):
+            raise ValueError("CANDIDATE_QUEUE_POLICY must be fifo or age_bands")
+        from candidate_queue import validate_bands
+
+        bands = (
+            validate_bands(os.getenv("CANDIDATE_AGE_BANDS_SECONDS", "60,300,3600,86400").split(","))
+            if policy == "age_bands"
+            else (60, 300, 3600, 86400)
+        )
         return cls(
+            candidate_queue_policy=policy,
+            candidate_age_bands_seconds=bands,
             pvc_mount_path=os.getenv("PVC_MOUNT_PATH", DEFAULT_PVC_MOUNT_PATH),
             cleanup_threshold=float(os.getenv("CLEANUP_THRESHOLD", str(DEFAULT_CLEANUP_THRESHOLD))),
             target_threshold=float(os.getenv("TARGET_THRESHOLD", str(DEFAULT_TARGET_THRESHOLD))),

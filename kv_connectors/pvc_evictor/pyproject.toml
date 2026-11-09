@@ -19,5 +19,5 @@ dependencies = []
 dev = ["pytest>=8.0"]
 
 [tool.setuptools]
-py-modules = ["evictor", "config"]
+py-modules = ["evictor", "config", "candidate_queue"]
 packages = ["processes", "utils"]

@@ -382,7 +382,12 @@ def crawler_process(
 
                 # Queue the file
                 try:
-                    file_queue.put(str(file_path), timeout=1.0)
+                    candidate = str(file_path)
+                    if config_dict.get("candidate_queue_policy") == "age_bands":
+                        from candidate_queue import Candidate
+
+                        candidate = Candidate.from_stat(file_path, file_stat)
+                    file_queue.put(candidate, timeout=1.0)
                     files_queued += 1
 
                     # Log progress periodically

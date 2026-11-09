@@ -165,3 +165,7 @@ In dry run mode:
 - [QUICK_START.md](QUICK_START.md) - Deployment guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture
 - [helm/README.md](helm/README.md) - Helm chart documentation
+
+## Age-banded candidates (optional)
+
+See [Age-banded candidates](README.age-bands.md) for configuration, supported behavior and validation limits. This option is disabled by default.

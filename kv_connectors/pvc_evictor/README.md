@@ -241,3 +241,7 @@ make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm
 - Helm 3.0+ (for Helm deployment)
 - Bounded PVC
 - Security context values (fsGroup, seLinuxOptions, runAsUser)
+
+## Age-banded candidates (optional)
+
+See [Age-banded candidates](README.age-bands.md) for configuration, supported behavior and validation limits. This option is disabled by default.

@@ -10,7 +10,7 @@ RUN python3 -m pip install --no-cache-dir msgpack pyzmq \
     && printf '%s\n' '# Minimal package init for pvc_evictor event publishing.' > /app/llmd_fs_backend/__init__.py
 COPY llmd_fs_backend/llmd_fs_backend/event_publisher.py /app/llmd_fs_backend/event_publisher.py
 
-COPY pvc_evictor/config.py pvc_evictor/evictor.py ./
+COPY pvc_evictor/config.py pvc_evictor/evictor.py pvc_evictor/candidate_queue.py ./
 COPY pvc_evictor/utils/ ./utils/
 COPY pvc_evictor/processes/ ./processes/
 

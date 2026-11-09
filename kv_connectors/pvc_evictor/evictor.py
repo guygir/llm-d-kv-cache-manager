@@ -8,6 +8,7 @@ N+2 Process Architecture:
 - P(N+2): Deleter process that performs actual file deletions
 """
 
+import contextlib
 import logging
 import multiprocessing
 import os
@@ -52,7 +53,26 @@ class PVCEvictor:
 
         # Initialize shared objects for IPC
         self.deletion_event = multiprocessing.Event()  # Activator controls Deleter, Crawlers check this
-        self.deletion_queue = multiprocessing.Queue(maxsize=config.file_queue_maxsize)  # Crawlers → Deleter
+        self._candidate_manager = None
+        if config.candidate_queue_policy == "age_bands":
+            from candidate_queue import CandidateManager, CandidateQueue, validate_bands
+
+            bands = validate_bands(config.candidate_age_bands_seconds)
+            if config.file_queue_maxsize <= 0:
+                raise ValueError("Age-banded queue capacity must be positive")
+            facade = CandidateQueue(None, bands, config.file_access_time_threshold_minutes * 60)
+            self._candidate_manager = CandidateManager(ctx=multiprocessing.get_context("spawn"))
+            self._candidate_manager.start()
+            try:
+                facade.backend = self._candidate_manager.AgeBandStore(config.file_queue_maxsize, bands)
+                self.deletion_queue = facade
+            except BaseException:
+                self._candidate_manager.shutdown()
+                raise
+        elif config.candidate_queue_policy == "fifo":
+            self.deletion_queue = multiprocessing.Queue(maxsize=config.file_queue_maxsize)
+        else:
+            raise ValueError("Unknown candidate queue policy")
         self.result_queue = multiprocessing.Queue()  # Deleter → Main
         self.shutdown_event = multiprocessing.Event()  # All processes check this
 
@@ -65,7 +85,7 @@ class PVCEvictor:
         # Convert Config to dict for pickling (needed for multiprocessing)
         self.config_dict = self.config.to_dict()
 
-        total_procs = config.num_crawler_processes + 2
+        total_procs = config.num_crawler_processes + 2 + (config.candidate_queue_policy == "age_bands")
         if config.enable_dir_cleanup:
             total_procs += 1
 
@@ -132,9 +152,14 @@ class PVCEvictor:
         self.shutdown_event.set()  # Signal all processes to shutdown
         self.deletion_event.clear()  # Stop deletion immediately
 
+    def _check_candidate_manager(self):
+        if self._candidate_manager is not None and not self._candidate_manager._process.is_alive():
+            raise RuntimeError("Candidate index process died; stopping cleanup for supervised restart")
+
     def run(self):
         """Main coordination loop - spawns and manages all processes."""
-        total_processes = self.config.num_crawler_processes + 2
+        self._check_candidate_manager()
+        total_processes = self.config.num_crawler_processes + 2 + (self._candidate_manager is not None)
         if self.config.enable_dir_cleanup:
             total_processes += 1
         self.logger.info(f"Starting {total_processes}-process evictor service...")
@@ -242,6 +267,7 @@ class PVCEvictor:
 
         try:
             while self.running:
+                self._check_candidate_manager()
                 try:
                     # Check for deletion results
                     result = self.result_queue.get(timeout=5.0)
@@ -282,6 +308,8 @@ class PVCEvictor:
                             self.config.target_threshold,
                             folder_cleaner_stats,
                         )
+                        if self._candidate_manager is not None:
+                            self.logger.info("Candidate age-band stats: %s", self.deletion_queue.stats())
                         last_aggregated_log_time = current_time
 
                 except Exception:
@@ -410,6 +438,10 @@ class PVCEvictor:
                     folder_cleaner_process_obj.terminate()
                     folder_cleaner_process_obj.join(timeout=5)
 
+            if self._candidate_manager is not None:
+                with contextlib.suppress(EOFError, BrokenPipeError, OSError):
+                    self.deletion_queue.close()
+                    self._candidate_manager.shutdown()
             self.logger.info("All processes stopped")
 
 
@@ -428,7 +460,7 @@ def main():
             print(f"ERROR: {e}", flush=True)
             sys.exit(1)
 
-        total_procs = config.num_crawler_processes + 2
+        total_procs = config.num_crawler_processes + 2 + (config.candidate_queue_policy == "age_bands")
         if config.enable_dir_cleanup:
             total_procs += 1
 
