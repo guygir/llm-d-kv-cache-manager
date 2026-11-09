@@ -178,12 +178,18 @@ def delete_file_batch(
     cache_path=None,
     *,
     file_access_time_threshold_minutes: float = DEFAULT_FILE_ACCESS_TIME_THRESHOLD_MINUTES,
+    admission_event=None,
+    shutdown_event=None,
 ) -> tuple[int, int, float]:
     """
     Process a batch of files for deletion and report progress to main process.
 
     Returns: (updated_total_files_deleted, updated_total_bytes_freed, batch_start_time)
     """
+    if admission_event is not None and (
+        not admission_event.is_set() or (shutdown_event is not None and shutdown_event.is_set())
+    ):
+        return total_files_deleted, total_bytes_freed, prev_batch_time
     batch_start_time = time.time()
     deleted, freed, deleted_paths = delete_batch(
         batch,
@@ -300,6 +306,8 @@ def deleter_process(
                                 event_publisher,
                                 cache_path,
                                 file_access_time_threshold_minutes=file_access_time_threshold_minutes,
+                                admission_event=deletion_event if config_dict.get("cleanup_policy") else None,
+                                shutdown_event=shutdown_event,
                             )
                             current_batch = []
 
@@ -339,6 +347,8 @@ def deleter_process(
                             event_publisher,
                             cache_path,
                             file_access_time_threshold_minutes=file_access_time_threshold_minutes,
+                            admission_event=deletion_event if config_dict.get("cleanup_policy") else None,
+                            shutdown_event=shutdown_event,
                         )
                         current_batch = []
                         last_batch_check_time = current_time
@@ -373,6 +383,8 @@ def deleter_process(
                 event_publisher,
                 cache_path,
                 file_access_time_threshold_minutes=file_access_time_threshold_minutes,
+                admission_event=deletion_event if config_dict.get("cleanup_policy") else None,
+                shutdown_event=shutdown_event,
             )
 
     except Exception as e:

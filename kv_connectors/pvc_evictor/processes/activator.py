@@ -35,12 +35,60 @@ def activator_process(
     logger.info(f"Activator P{process_num} started - monitoring every {logger_interval}s")
     logger.info(f"Activator P{process_num} thresholds: cleanup={cleanup_threshold}%, target={target_threshold}%")
 
+    controller = None
+    sampler = None
+    if config_dict.get("cleanup_policy"):
+        from cleanup_policy import CleanupController, CleanupSettings
+
+        settings = CleanupSettings.from_dict(config_dict["cleanup_policy"])
+        controller = CleanupController(settings, cleanup_threshold, target_threshold)
+        from activity import ActivitySampler
+
+        sampler = ActivitySampler(settings.sources, settings.poll_timeout_seconds)
     deletion_active = False
     last_stats_send_time = 0.0
 
     try:
         while not shutdown_event.is_set():
             usage = get_disk_usage_from_statvfs(mount_path)
+
+            if controller is not None:
+                from activity import Activity
+
+                needs_sample = usage is not None and (controller.requested or usage.usage_percent >= cleanup_threshold)
+                activity = sampler.sample() if needs_sample else Activity(None, "no actionable cleanup pressure")
+                decision = controller.decide(usage.usage_percent if usage else None, activity.idle, time.monotonic())
+                if decision.enabled:
+                    deletion_event.set()
+                else:
+                    deletion_event.clear()
+                if decision != getattr(controller, "last_decision", None):
+                    logger.info(
+                        "Cleanup mode=%s admitted=%s reason=%s activity=%s",
+                        decision.mode,
+                        decision.enabled,
+                        decision.reason,
+                        activity.reason,
+                    )
+                    controller.last_decision = decision
+                if usage:
+                    last_stats_send_time = send_stats_to_queue(
+                        result_queue,
+                        "activator_stats",
+                        process_num,
+                        {
+                            "usage_percent": usage.usage_percent,
+                            "used_bytes": usage.used_bytes,
+                            "available_bytes": usage.available_bytes,
+                            "total_bytes": usage.total_bytes,
+                            "deletion_active": decision.enabled,
+                            "cleanup_mode": decision.mode,
+                            "activity_known": activity.idle is not None,
+                        },
+                        last_stats_send_time,
+                    )
+                shutdown_event.wait(logger_interval)
+                continue
 
             if usage:
                 current_time = time.time()
@@ -96,5 +144,7 @@ def activator_process(
     except Exception as e:
         logger.exception(f"Activator P{process_num} error: {e}")
     finally:
+        if sampler is not None:
+            sampler.close()
         logger.info(f"Activator P{process_num} stopping")
         deletion_event.clear()

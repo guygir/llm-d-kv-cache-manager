@@ -229,7 +229,9 @@ def stream_cache_files_with_mapper(
             queue_folder(rank_dir.path, folder_queue, on_empty_folder_discovered, dir_cleanup_ttl_seconds)
 
 
-def admitted_files(file_stream, get_queue_size, deletion_event, shutdown_event, min_queue_size, max_queue_size):
+def admitted_files(
+    file_stream, get_queue_size, deletion_event, shutdown_event, min_queue_size, max_queue_size, *, pause_when_off=False
+):
     """Pause before advancing traversal while the current queue target is full.
 
     Queue size is approximate: callers still check capacity before enqueueing.
@@ -237,6 +239,9 @@ def admitted_files(file_stream, get_queue_size, deletion_event, shutdown_event, 
     when deletion activates. Event.wait also makes shutdown interrupt the pause.
     """
     while not shutdown_event.is_set():
+        if pause_when_off and not deletion_event.is_set():
+            shutdown_event.wait(QUEUE_FULL_SLEEP_SECONDS)
+            continue
         target = max_queue_size if deletion_event.is_set() else min_queue_size
         if get_queue_size() >= target:
             shutdown_event.wait(QUEUE_FULL_SLEEP_SECONDS)
@@ -330,7 +335,13 @@ def crawler_process(
             )
 
             for file_path in admitted_files(
-                file_stream, get_queue_size, deletion_event, shutdown_event, min_queue_size, max_queue_size
+                file_stream,
+                get_queue_size,
+                deletion_event,
+                shutdown_event,
+                min_queue_size,
+                max_queue_size,
+                pause_when_off=bool(config_dict.get("cleanup_policy")),
             ):
                 files_discovered += 1
                 current_time = time.time()

@@ -36,6 +36,10 @@ class PVCEvictor:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.running = True
+        if config.cleanup_policy is not None:
+            from cleanup_policy import validate_cpu_budget
+
+            validate_cpu_budget(config.cleanup_policy)
 
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -121,7 +125,7 @@ class PVCEvictor:
         It coordinates graceful shutdown across all processes:
 
         1. Sets shutdown_event - All child processes check this in their loops and exit
-        2. Clears deletion_event - Immediately stops any ongoing deletion operations
+        2. Clears deletion_event - Stops new deletion admission; already admitted operations may finish
         3. Sets running = False - Causes main loop to exit
         4. Main process then waits for all child processes in run() finally block
 
@@ -130,7 +134,7 @@ class PVCEvictor:
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
         self.shutdown_event.set()  # Signal all processes to shutdown
-        self.deletion_event.clear()  # Stop deletion immediately
+        self.deletion_event.clear()  # Stop new deletion admission
 
     def run(self):
         """Main coordination loop - spawns and manages all processes."""
@@ -226,6 +230,7 @@ class PVCEvictor:
                     self.result_queue,
                     self.shutdown_event,
                     self.config_dict,
+                    self.deletion_event,
                 ),
                 name=f"FolderCleaner-P{cleaner_process_num}",
             )
@@ -341,6 +346,7 @@ class PVCEvictor:
                                 self.result_queue,
                                 self.shutdown_event,
                                 self.config_dict,
+                                self.deletion_event,
                             ),
                             name=f"FolderCleaner-P{cleaner_process_num}",
                         )

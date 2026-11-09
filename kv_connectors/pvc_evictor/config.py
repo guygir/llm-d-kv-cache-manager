@@ -3,6 +3,8 @@
 import os
 from dataclasses import dataclass
 
+from cleanup_policy import CleanupSettings
+
 # Default configuration values
 DEFAULT_PVC_MOUNT_PATH = "/kv-cache"
 DEFAULT_CLEANUP_THRESHOLD = 85.0
@@ -49,9 +51,12 @@ class Config:
     log_file_path: str | None = None  # Optional file path to write logs to (default: None, stdout only)
     storage_events_endpoint: str = ""  # Storage events publisher endpoint
 
+    cleanup_policy: CleanupSettings | None = None
+
     def to_dict(self) -> dict:
         """Convert configuration to dictionary for multiprocessing."""
         return {
+            "cleanup_policy": self.cleanup_policy.to_dict() if self.cleanup_policy else None,
             "pvc_mount_path": self.pvc_mount_path,
             "cleanup_threshold": self.cleanup_threshold,
             "target_threshold": self.target_threshold,
@@ -72,7 +77,10 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
+        cleanup = float(os.getenv("CLEANUP_THRESHOLD", str(DEFAULT_CLEANUP_THRESHOLD)))
+        target = float(os.getenv("TARGET_THRESHOLD", str(DEFAULT_TARGET_THRESHOLD)))
         return cls(
+            cleanup_policy=CleanupSettings.from_env(cleanup, target),
             pvc_mount_path=os.getenv("PVC_MOUNT_PATH", DEFAULT_PVC_MOUNT_PATH),
             cleanup_threshold=float(os.getenv("CLEANUP_THRESHOLD", str(DEFAULT_CLEANUP_THRESHOLD))),
             target_threshold=float(os.getenv("TARGET_THRESHOLD", str(DEFAULT_TARGET_THRESHOLD))),

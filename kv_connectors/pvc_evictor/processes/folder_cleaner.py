@@ -56,6 +56,7 @@ def folder_cleaner_process(
     result_queue: Any,
     shutdown_event: Any,
     config_dict: dict,
+    deletion_event=None,
 ):
     """
     Background process that pulls directory paths from folder_queue
@@ -75,6 +76,9 @@ def folder_cleaner_process(
 
     try:
         while not shutdown_event.is_set():
+            if config_dict.get("cleanup_policy") and deletion_event is not None and not deletion_event.is_set():
+                shutdown_event.wait(0.1)
+                continue
             try:
                 # Pull directory path from queue (block up to 1 second)
                 try:
